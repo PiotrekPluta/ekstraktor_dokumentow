@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Editor swap files
+*.swp
+*.swo
+*~
+
+# Project specific
+*.gguf
+vendor/
+data/corpus/huge_*
+*.sqlite
