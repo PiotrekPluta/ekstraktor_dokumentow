@@ -165,6 +165,44 @@ def test_file_rejects_unknown_format(conn: sqlite3.Connection) -> None:
         )
 
 
+def test_file_content_source_defaults_to_own(conn: sqlite3.Connection) -> None:
+    insert_document(conn, "doc1")
+    conn.execute(
+        "INSERT INTO files (path, format, byte_sha256, size_bytes, document_id, discovered_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("Faktury/f1.pdf", "pdf", "a" * 64, 1234, "doc1", NOW),
+    )
+    (content_source,) = conn.execute(
+        "SELECT content_source FROM files WHERE path = 'Faktury/f1.pdf'"
+    ).fetchone()
+    assert content_source == "own"
+
+
+def test_file_content_source_records_eml_attachment(conn: sqlite3.Connection) -> None:
+    insert_document(conn, "doc1")
+    conn.execute(
+        "INSERT INTO files "
+        "(path, format, byte_sha256, size_bytes, document_id, content_source, discovered_at) "
+        "VALUES (?, 'eml', ?, 100, 'doc1', 'eml_attachment', ?)",
+        ("Faktury/f1_mailem.eml", "a" * 64, NOW),
+    )
+    (content_source,) = conn.execute(
+        "SELECT content_source FROM files WHERE path = 'Faktury/f1_mailem.eml'"
+    ).fetchone()
+    assert content_source == "eml_attachment"
+
+
+def test_file_rejects_invalid_content_source(conn: sqlite3.Connection) -> None:
+    insert_document(conn, "doc1")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO files "
+            "(path, format, byte_sha256, size_bytes, document_id, content_source, discovered_at) "
+            "VALUES (?, 'eml', ?, 100, 'doc1', 'made_up', ?)",
+            ("Faktury/f1.eml", "a" * 64, NOW),
+        )
+
+
 def test_two_files_can_share_one_document_id(conn: sqlite3.Connection) -> None:
     insert_document(conn, "doc1")
     conn.execute(
