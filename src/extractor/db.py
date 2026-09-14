@@ -11,6 +11,12 @@ Four tables, per docs/PROJECT_NOTES.md §8 Stage 7:
   resolves to. Duplicates are files whose document_id is shared with another
   row; the report's `duplicate_files` count falls out of that by
   arithmetic (input_files - unique_documents), so it is not stored directly.
+  `content_source` is `'eml_attachment'` when an `.eml` file's identity and
+  text came from an attachment rather than its own body (an email
+  forwarding an invoice IS that invoice) — `path` stays the `.eml`'s own
+  real path either way, so `eval`'s join against `expected.jsonl` never
+  needs a synthetic path; this column exists purely for `sqlite3`
+  inspectability.
 - `token_ledger` — append-only. One row per LLM call *attempt* (reservation
   committed before the call, actual usage filled in after the response), so
   a process killed mid-call leaves a conservative, never-exceeded budget
@@ -103,6 +109,8 @@ CREATE TABLE IF NOT EXISTS files (
     byte_sha256     TEXT NOT NULL,
     size_bytes      INTEGER NOT NULL,
     document_id     TEXT NOT NULL REFERENCES documents(id),
+    content_source  TEXT NOT NULL DEFAULT 'own'
+                        CHECK (content_source IN ('own', 'eml_attachment')),
     discovered_at   TEXT NOT NULL
 );
 
