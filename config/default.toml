@@ -1,0 +1,46 @@
+# Default run configuration.
+#
+# Backend/model selection is NOT pinned yet — see docs/PROJECT_NOTES.md §4.
+# TBD values below are placeholders so the config shape exists before Stage 5
+# (LLM client) fills them in with a real pinned model + digest, per
+# docs/ZADANIE.md requirement 2 ("model pinned to tag + digest").
+
+[run]
+workers = 4
+# limit / budget: unset = unlimited. Set as integers to cap a run.
+# limit = 5
+# budget = 100000
+
+[backend]
+# One of: "fake" (tests, no network/model), "llama_server", "ollama".
+name = "fake"
+
+[backend.llama_server]
+host = "127.0.0.1"
+port = 8080
+model_repo = "TBD"       # Hugging Face repo, e.g. speakleash/Bielik-4.5B-v3.0-Instruct-GGUF
+model_revision = "TBD"   # pinned commit, not a branch
+model_file = "TBD"
+model_sha256 = "TBD"
+context_tokens = 2048
+
+[backend.ollama]
+host = "127.0.0.1"
+port = 11434
+model_tag = "TBD"
+model_digest = "TBD"
+context_tokens = 2048
+
+# USD per 1,000,000 tokens. Local backends are 0.0 — the cost mechanism
+# still runs, it just always totals zero (docs/ZADANIE.md requirement 6).
+[pricing.fake]
+input_per_million = 0.0
+output_per_million = 0.0
+
+[pricing.llama_server]
+input_per_million = 0.0
+output_per_million = 0.0
+
+[pricing.ollama]
+input_per_million = 0.0
+output_per_million = 0.0
