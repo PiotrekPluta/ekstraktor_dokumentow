@@ -3,19 +3,24 @@
 Every function here either returns extracted text or raises
 `ExtractionFailed` carrying one of the closed quarantine-reason values from
 docs/PROJECT_NOTES.md §8 Stage 3: `corrupt_file`, `unsupported_format`,
-`empty_text`, `no_text_layer`. (`parse_timeout` and `llm_invalid_output`
-aren't produced here — the former needs the subprocess/timeout hardening
-that's explicitly deferred to Stage 3, the latter is a Stage 6 concern.)
+`empty_text`, `no_text_layer`. (`parse_timeout` is produced by the subprocess
+wrapper in extractor/inventory.py, not here; `llm_invalid_output` is a
+Stage 6 concern.)
 
-No subprocess isolation or timeout yet: a pathological file could hang this
-today. That hardening is Stage 3's job, wrapping these same functions.
+`extract_text` accepts either `bytes` (an eml attachment's payload, which
+only ever exists in memory) or a `Path` (everything else, per
+extractor/inventory.py). TXT/HTML still cap what they read at MAX_TEXT_CHARS
+regardless of source — that bound exists to keep memory safe for the
+~300MB fixture (docs/DATA_SPEC.md), not to pick good model context (Stage 4
+replaces this with real head/tail/keyword windowing for the actual LLM
+call), and two documents identical only up to the cap would dedup together.
+PDF/DOCX, given a Path, are opened natively by pypdfium2/python-docx
+instead — no read-then-truncate step, so a large PDF/DOCX is read
+correctly rather than corrupted by a byte-cap landing mid zip-central-
+directory or PDF xref table.
 
-Reading is capped at MAX_TEXT_CHARS for every format. This exists to bound
-memory for the ~300MB fixture (docs/DATA_SPEC.md), not to pick good model
-context — Stage 4 replaces this with real head/tail/keyword windowing for
-the actual LLM call. A side effect worth stating plainly: two documents
-identical only up to the cap would dedup together. Not exercised by the
-current fixtures, but a real limitation.
+No timeout here — that's enforced by the subprocess wrapper one layer up,
+which can actually kill a hung call; nothing at this layer can.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from dataclasses import dataclass
 from email import policy
 from email.message import EmailMessage
 from html.parser import HTMLParser
+from pathlib import Path
 
 import docx
 import pypdfium2 as pdfium
@@ -62,31 +68,45 @@ class ExtractionResult:
     content_source: str = "own"
 
 
-def extract_text(fmt: Format, data: bytes) -> ExtractionResult:
+def extract_text(fmt: Format, source: bytes | Path) -> ExtractionResult:
     if fmt is Format.UNKNOWN:
         raise ExtractionFailed(
             "unsupported_format", "format not recognised from magic bytes"
         )
     if fmt is Format.TXT:
-        return ExtractionResult(_extract_txt(data))
+        return ExtractionResult(_extract_txt(source))
     if fmt is Format.HTML:
-        return ExtractionResult(_extract_html(data))
+        return ExtractionResult(_extract_html(source))
     if fmt is Format.EML:
-        return _extract_eml(data)
+        return _extract_eml(_read_full(source))
     if fmt is Format.PDF:
-        return ExtractionResult(_extract_pdf(data))
+        return ExtractionResult(_extract_pdf(source))
     if fmt is Format.DOCX:
-        return ExtractionResult(_extract_docx(data))
+        return ExtractionResult(_extract_docx(source))
     raise AssertionError(f"unhandled format: {fmt!r}")  # pragma: no cover
 
 
-def _extract_txt(data: bytes) -> str:
-    return decode_bytes(data[:MAX_TEXT_CHARS])
+def _read_capped(source: bytes | Path, cap: int) -> bytes:
+    if isinstance(source, (bytes, bytearray)):
+        return bytes(source[:cap])
+    with Path(source).open("rb") as fh:
+        return fh.read(cap)
 
 
-def _extract_html(data: bytes) -> str:
+def _read_full(source: bytes | Path) -> bytes:
+    if isinstance(source, (bytes, bytearray)):
+        return bytes(source)
+    return Path(source).read_bytes()
+
+
+def _extract_txt(source: bytes | Path) -> str:
+    return decode_bytes(_read_capped(source, MAX_TEXT_CHARS))
+
+
+def _extract_html(source: bytes | Path) -> str:
+    data = _read_capped(source, MAX_TEXT_CHARS)
     declared = _sniff_html_charset(data)
-    text = decode_bytes(data[:MAX_TEXT_CHARS], declared)
+    text = decode_bytes(data, declared)
     collector = _HTMLTextCollector()
     collector.feed(text)
     collector.close()
@@ -193,9 +213,13 @@ def _extract_eml_body(msg: EmailMessage) -> str:
     return ""
 
 
-def _extract_pdf(data: bytes) -> str:
+def _extract_pdf(source: bytes | Path) -> str:
+    # pdfium opens a Path natively (random-access reads against the real
+    # file), unlike a read-then-slice approach — a truncated byte cap would
+    # land mid xref-table on a large PDF and misreport it as corrupt.
+    pdf_source = source if isinstance(source, (bytes, bytearray)) else str(source)
     try:
-        pdf = pdfium.PdfDocument(data)
+        pdf = pdfium.PdfDocument(pdf_source)
     except pdfium.PdfiumError as exc:
         raise ExtractionFailed(
             "corrupt_file", f"pdfium could not open document: {exc}"
@@ -224,9 +248,13 @@ def _extract_pdf(data: bytes) -> str:
     return combined
 
 
-def _extract_docx(data: bytes) -> str:
+def _extract_docx(source: bytes | Path) -> str:
+    # Same reasoning as _extract_pdf: the docx central directory lives at
+    # the end of the file, so zipfile/python-docx open the Path natively
+    # rather than a truncated byte cap risking a false corrupt_file.
+    is_bytes = isinstance(source, (bytes, bytearray))
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        with zipfile.ZipFile(io.BytesIO(source) if is_bytes else source) as zf:
             names = zf.namelist()
     except zipfile.BadZipFile as exc:
         raise ExtractionFailed("corrupt_file", f"not a valid zip: {exc}") from exc
@@ -235,7 +263,7 @@ def _extract_docx(data: bytes) -> str:
         raise ExtractionFailed("unsupported_format", "zip file is not a docx package")
 
     try:
-        document = docx.Document(io.BytesIO(data))
+        document = docx.Document(io.BytesIO(source) if is_bytes else source)
     except Exception as exc:
         # python-docx raises several different exception types for a broken
         # package (KeyError, PackageNotFoundError, lxml parse errors...) —
