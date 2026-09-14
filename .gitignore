@@ -226,4 +226,5 @@ __marimo__/
 *.gguf
 vendor/
 data/corpus/huge_*
+data/corpus_scale/
 *.sqlite

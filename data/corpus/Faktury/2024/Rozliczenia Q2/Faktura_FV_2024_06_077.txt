@@ -1,0 +1,54 @@
+FAKTURA VAT NR FV/2024/06/077
+=============================
+
+NIP nabywcy: 6751234567
+
+Nabywca:
+
+Spó³dzielnia Mieszkaniowa "Zielone Wzgórze" w Krakowie
+
+ul. Ogrodowa 14
+
+30-002 Kraków
+
+Polska
+
+NIP: 
+
+
+
+Sprzedawca:
+
+P.P.H.U. Kowalski Marek
+
+ul. D³uga 12
+
+61-003 Poznañ
+
+Polska
+
+NIP: 907 096 60 95
+
+REGON: 065792052
+
+KRS: 0325134628
+
+Nr rachunku: PL19 6816 1548 1702 8967 7537 1978
+
+Nr dokumentu wewnêtrznego: 5502190034
+
+
+
+Data wystawienia: 12 stycznia 2024
+
+Termin p³atnoœci: 14 dni od daty wystawienia
+
+
+
+Lp. | Nazwa | Iloœæ | Cena netto | Wartoœæ netto
+1 | Naprawa instalacji hydraulicznej | 1 | 560.00 | 560.00
+ |  |  | Netto razem | 560.00
+ |  |  | VAT 23% | 128.80
+ |  |  | Brutto razem | 688.80
+
+Do zap³aty: 688,80 z³

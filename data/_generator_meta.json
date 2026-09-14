@@ -1,0 +1,402 @@
+{
+  "buyer_identities": [
+    {
+      "name": "Spółdzielnia Mieszkaniowa \"Zielone Wzgórze\" w Krakowie",
+      "tax_id": "6751234567"
+    },
+    {
+      "name": "SM \"Zielone Wzgórze\" — Zarząd Nieruchomości",
+      "tax_id": "6751234567"
+    }
+  ],
+  "documents": [
+    {
+      "doc_id": "inv01",
+      "doc_type": "invoice",
+      "files": [
+        "Faktury/2024/Dostawcy zewnętrzni/Faktura_FV_2024_03_018.pdf",
+        "Faktury/Kopie robocze/Faktura_FV_2024_03_018_kopia.pdf",
+        "Faktury/Kopie zapasowe/Faktura_FV_2024_03_018_mailem.eml"
+      ],
+      "tags": [
+        "amount-labeled-net-gross",
+        "currency-symbol-unambiguous-zl",
+        "nip-format-plain",
+        "name-with-quotes",
+        "legal-form-sp-zoo",
+        "date-format-dotted"
+      ]
+    },
+    {
+      "doc_id": "inv02",
+      "doc_type": "invoice",
+      "files": [
+        "Faktury/2024/Dostawcy zewnętrzni/Faktura_korygująca_FK_2024_05_003.docx",
+        "Faktury/Kopie robocze/Faktura_korygująca_kopia.docx"
+      ],
+      "tags": [
+        "correction-invoice",
+        "negative-amount",
+        "currency-only-PLN-code",
+        "nip-format-dashed",
+        "legal-form-sa",
+        "date-format-iso",
+        "decoy-print-date-footer",
+        "decoy-sale-date"
+      ]
+    },
+    {
+      "doc_id": "inv03",
+      "doc_type": "invoice",
+      "files": [
+        "Faktury/2024/Rozliczenia Q2/Invoice_INV-2024-0044.pdf"
+      ],
+      "tags": [
+        "currency-symbol-ambiguous",
+        "english",
+        "invoice-english-1",
+        "legal-form-ltd",
+        "date-format-english-long",
+        "date-format-us-slash-ambiguous"
+      ]
+    },
+    {
+      "doc_id": "inv04",
+      "doc_type": "invoice",
+      "files": [
+        "Faktury/2024/Rozliczenia Q2/Invoice_RE-2024-0091.eml"
+      ],
+      "tags": [
+        "currency-from-vat-prefix",
+        "foreign-vat-id",
+        "english",
+        "invoice-english-2",
+        "legal-form-gmbh",
+        "no-address-1-of-3"
+      ]
+    },
+    {
+      "doc_id": "inv05",
+      "doc_type": "invoice",
+      "files": [
+        "Faktury/2024/Rozliczenia Q2/Faktura_FV_2024_06_077.txt",
+        "Faktury/Kopie robocze/Faktura_FV_2024_06_077_crlf.txt"
+      ],
+      "tags": [
+        "buyer-nip-first",
+        "decoy-regon",
+        "decoy-krs",
+        "decoy-iban",
+        "decoy-invoice-number-tendigit",
+        "due-date-derived",
+        "currency-from-seller-country",
+        "nip-format-spaced",
+        "legal-form-pphu",
+        "date-format-polish-long",
+        "encoding-cp1250"
+      ]
+    },
+    {
+      "doc_id": "inv06",
+      "doc_type": "invoice",
+      "files": [
+        "Faktury/2024/Dostawcy zewnętrzni/Faktura_FV_2024_08_052.pdf"
+      ],
+      "tags": [
+        "buyer-nip-prominent",
+        "buyer-decoy-prominent",
+        "buyer-precedes-seller",
+        "amount-nbsp-separator",
+        "amount-in-words",
+        "currency-buyer-address-ignored",
+        "legal-form-spzoospk",
+        "date-format-polish-long"
+      ]
+    },
+    {
+      "doc_id": "inv07",
+      "doc_type": "invoice",
+      "files": [
+        "Faktury/2024/Rozliczenia Q2/Faktura_FV_2024_09_019.docx"
+      ],
+      "tags": [
+        "nip-checksum-fail",
+        "date-format-polish-long"
+      ]
+    },
+    {
+      "doc_id": "inv08",
+      "doc_type": "invoice",
+      "files": [
+        "Faktury/2024/Rozliczenia Q2/Faktura_FV_2024_10_205.pdf"
+      ],
+      "tags": [
+        "amount-multipage-subtotal",
+        "amount-narrow-nbsp",
+        "decoy-page-count",
+        "date-format-polish-long"
+      ]
+    },
+    {
+      "doc_id": "inv09",
+      "doc_type": "invoice",
+      "files": [
+        "Faktury/2024/Rozliczenia Q2/Faktura_FV_2024_07_301.html",
+        "Faktury/Kopie robocze/Faktura_FV_2024_07_301_cp1250.html"
+      ],
+      "tags": [
+        "near-dup-different-doc",
+        "currency-only-PLN-code",
+        "nip-format-pl-prefixed"
+      ]
+    },
+    {
+      "doc_id": "inv10",
+      "doc_type": "invoice",
+      "files": [
+        "Faktury/2024/Rozliczenia Q2/Faktura_FV_2024_07_302.html"
+      ],
+      "tags": [
+        "near-dup-different-doc",
+        "currency-only-PLN-code"
+      ]
+    },
+    {
+      "doc_id": "contract01",
+      "doc_type": "contract",
+      "files": [
+        "Umowy/Załączniki/2024/Umowa_U_2024_11_002.pdf"
+      ],
+      "tags": [
+        "long-document",
+        "nip-page-280",
+        "amount-final-page",
+        "quotes-english-clause",
+        "contract-due-date-term-end",
+        "legal-form-sp-zoo",
+        "date-format-roman"
+      ]
+    },
+    {
+      "doc_id": "contract02",
+      "doc_type": "contract",
+      "files": [
+        "Umowy/Załączniki/2024/Umowa_U_2024_12_017.pdf"
+      ],
+      "tags": [
+        "currency-address-beats-prefix",
+        "contract-due-date-term-end",
+        "date-format-polish-long"
+      ]
+    },
+    {
+      "doc_id": "contract03",
+      "doc_type": "contract",
+      "files": [
+        "Umowy/Załączniki/2024/Service_Agreement_SA-2024-014.docx"
+      ],
+      "tags": [
+        "currency-from-seller-country",
+        "contract-english",
+        "legal-form-gmbh",
+        "name-in-signature-only",
+        "amount-symbol-prefix-eur",
+        "contract-due-date-term-end",
+        "date-format-english-long"
+      ]
+    },
+    {
+      "doc_id": "contract04",
+      "doc_type": "contract",
+      "files": [
+        "Umowy/Załączniki/2024/Umowa_U_2024_09_031.html"
+      ],
+      "tags": [
+        "currency-unresolvable",
+        "address-no-country-line",
+        "name-with-diacritics",
+        "buyer-decoy-prominent",
+        "buyer-precedes-seller",
+        "contract-due-date-term-end",
+        "date-format-polish-long"
+      ]
+    },
+    {
+      "doc_id": "contract05",
+      "doc_type": "contract",
+      "files": [
+        "Umowy/Załączniki/2024/Umowa_U_2024_04_009_wariant_A.docx"
+      ],
+      "tags": [
+        "near-dup-different-doc",
+        "decoy-penalty-clause-amount",
+        "contract-due-date-term-end",
+        "date-format-polish-long"
+      ]
+    },
+    {
+      "doc_id": "contract06",
+      "doc_type": "contract",
+      "files": [
+        "Umowy/Załączniki/2024/Umowa_U_2024_04_009_wariant_B.docx"
+      ],
+      "tags": [
+        "near-dup-different-doc",
+        "decoy-penalty-clause-amount"
+      ]
+    },
+    {
+      "doc_id": "offer01",
+      "doc_type": "offer",
+      "files": [
+        "Oferty/Handlowe/2024/Oferta_OF_2024_05_012.pdf"
+      ],
+      "tags": [
+        "name-in-letterhead-only",
+        "buyer-decoy-prominent",
+        "currency-explicit-overrides-address",
+        "date-format-polish-long"
+      ]
+    },
+    {
+      "doc_id": "offer02",
+      "doc_type": "offer",
+      "files": [
+        "Oferty/Handlowe/2024/Oferta_OF_2024_06_044.docx",
+        "Oferty/Kopie/Oferta_OF_2024_06_044_kopia.docx"
+      ],
+      "tags": [
+        "offer-no-duedate",
+        "legal-form-spk",
+        "nip-format-pl-prefixed-labeled",
+        "date-format-polish-long"
+      ]
+    },
+    {
+      "doc_id": "offer03",
+      "doc_type": "offer",
+      "files": [
+        "Oferty/Handlowe/2024/Offer_facade_renovation.eml"
+      ],
+      "tags": [
+        "currency-from-vat-prefix-non-euro",
+        "no-address-2-of-3",
+        "english"
+      ]
+    },
+    {
+      "doc_id": "offer04",
+      "doc_type": "offer",
+      "files": [
+        "Oferty/Handlowe/2024/Oferta_OF_2024_07_003.txt",
+        "Oferty/Kopie/Oferta_OF_2024_07_003_ws.txt"
+      ],
+      "tags": [
+        "currency-buyer-prefix-ignored",
+        "no-address-3-of-3",
+        "no-tax-id",
+        "seller-sole-trader",
+        "date-format-polish-long",
+        "encoding-utf16le"
+      ]
+    },
+    {
+      "doc_id": "corr01",
+      "doc_type": "correspondence",
+      "files": [
+        "Korespondencja/Przychodzące/2024/Przypomnienie_o_platnosci.eml"
+      ],
+      "tags": [
+        "injection-ignore-instructions",
+        "name-in-eml-from-only",
+        "correspondence-amount-null"
+      ]
+    },
+    {
+      "doc_id": "corr02",
+      "doc_type": "correspondence",
+      "files": [
+        "Korespondencja/Przychodzące/2024/Zmiana_osoby_kontaktowej.eml"
+      ],
+      "tags": [
+        "injection-sql",
+        "correspondence-amount-null"
+      ]
+    },
+    {
+      "doc_id": "corr03",
+      "doc_type": "correspondence",
+      "files": [
+        "Korespondencja/Przychodzące/2024/Pump_replacement_estimate.eml"
+      ],
+      "tags": [
+        "injection-fake-json",
+        "currency-dollar-no-signal-null",
+        "english",
+        "attachment-absolute-path"
+      ]
+    },
+    {
+      "doc_id": "corr04",
+      "doc_type": "correspondence",
+      "files": [
+        "Korespondencja/Przychodzące/2024/Awaria_instalacji_wodnej.eml"
+      ],
+      "tags": [
+        "injection-path-write",
+        "from-is-buyer",
+        "attachment-path-traversal",
+        "correspondence-amount-null"
+      ]
+    },
+    {
+      "doc_id": "corr05",
+      "doc_type": "correspondence",
+      "files": [
+        "Korespondencja/Przychodzące/2024/Biuletyn_techniczny_maj_2024.html"
+      ],
+      "tags": [
+        "injection-html-script-iframe-comment",
+        "encoding-utf8-bom",
+        "correspondence-amount-null"
+      ]
+    },
+    {
+      "doc_id": "corr06",
+      "doc_type": "correspondence",
+      "files": [
+        "Korespondencja/Kopie zapasowe/Pismo_regulamin_domowy.docx",
+        "Korespondencja/Kopie zapasowe/Pismo_regulamin_domowy.html",
+        "Korespondencja/Przychodzące/2024/Pismo_regulamin_domowy.txt"
+      ],
+      "tags": [
+        "name-with-comma",
+        "no-tax-id",
+        "correspondence-amount-null",
+        "encoding-iso8859-2",
+        "decoy-receipt-stamp"
+      ]
+    },
+    {
+      "doc_id": "other01",
+      "doc_type": "other",
+      "files": [
+        "Inne/Dokumenty wewnętrzne/Notatka_NS_2024_06_002.pdf"
+      ],
+      "tags": [
+        "doc-type-other-internal-null-counterparty"
+      ]
+    },
+    {
+      "doc_id": "other02",
+      "doc_type": "other",
+      "files": [
+        "Inne/Dokumenty wewnętrzne/Karta_techniczna_KP-2200.txt",
+        "Inne/Kopie/Karta_techniczna_KP-2200_nbsp.txt"
+      ],
+      "tags": [
+        "doc-type-other-specsheet"
+      ]
+    }
+  ]
+}
