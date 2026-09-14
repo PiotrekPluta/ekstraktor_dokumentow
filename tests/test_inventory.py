@@ -1,19 +1,25 @@
-"""Stage 2 end-to-end: walking, hashing, dedup, and the files/documents
-writes, against both the real corpus and small synthetic fixtures for the
-guards (zip-slip-shaped names, zip bombs) that aren't exercised by it.
+"""Stage 2/3 end-to-end: walking, hashing, dedup, hardened (subprocess-
+isolated, timed-out) extraction, and the files/documents writes — against
+both the real corpus and small synthetic fixtures for the guards
+(zip-slip-shaped names, zip bombs, timeouts, crashes) it doesn't naturally
+exercise.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
+import tempfile
+import time
 import zipfile
 from pathlib import Path
 
 import pytest
 
+import extractor.inventory as inventory_module
 from extractor.db import connect
-from extractor.inventory import build_inventory
+from extractor.inventory import _run_with_timeout, build_inventory
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORPUS = REPO_ROOT / "data" / "corpus"
@@ -23,6 +29,20 @@ EXPECTED_JSONL = REPO_ROOT / "data" / "expected.jsonl"
 @pytest.fixture
 def conn(tmp_path: Path) -> sqlite3.Connection:
     return connect(tmp_path / "test.sqlite")
+
+
+@pytest.fixture(scope="module")
+def corpus_conn(tmp_path_factory: pytest.TempPathFactory) -> sqlite3.Connection:
+    """One real `build_inventory` run against the full corpus, shared by
+    every read-only assertion below. Stage 3's per-file subprocess
+    isolation makes a full scan take ~14s (not a hang — genuine spawn
+    overhead across 48 files); rebuilding it per test would multiply that
+    for no reason, since none of these tests mutate the db.
+    """
+    db_path = tmp_path_factory.mktemp("corpus_inventory") / "corpus.sqlite"
+    conn = connect(db_path)
+    build_inventory(conn, CORPUS)
+    return conn
 
 
 def _expected_groups() -> list[list[str]]:
@@ -38,23 +58,30 @@ def _actual_groups(conn: sqlite3.Connection) -> list[list[str]]:
     return sorted(sorted(paths) for paths in by_doc.values())
 
 
-def test_full_corpus_matches_expected_jsonl_grouping(conn: sqlite3.Connection) -> None:
+def test_full_corpus_matches_expected_jsonl_grouping(
+    corpus_conn: sqlite3.Connection,
+) -> None:
     """The real integration test: everything decided in inventory.py, run
     against the actual synthetic corpus, must dedup exactly the way
     data/expected.jsonl says a clean run would — including the 300MB fixture.
     """
-    stats = build_inventory(conn, CORPUS)
-    assert _actual_groups(conn) == _expected_groups()
-    assert stats.input_files == 48
-    assert stats.unique_documents == 38
-    assert stats.quarantined == 8
+    assert _actual_groups(corpus_conn) == _expected_groups()
+    (input_files,) = corpus_conn.execute("SELECT COUNT(*) FROM files").fetchone()
+    (unique_documents,) = corpus_conn.execute(
+        "SELECT COUNT(*) FROM documents"
+    ).fetchone()
+    (quarantined,) = corpus_conn.execute(
+        "SELECT COUNT(*) FROM documents WHERE status = 'quarantined'"
+    ).fetchone()
+    assert input_files == 48
+    assert unique_documents == 38
+    assert quarantined == 8
 
 
 def test_quarantined_documents_have_all_eight_corrupt_reasons_accounted_for(
-    conn: sqlite3.Connection,
+    corpus_conn: sqlite3.Connection,
 ) -> None:
-    build_inventory(conn, CORPUS)
-    rows = conn.execute(
+    rows = corpus_conn.execute(
         "SELECT quarantine_reason, COUNT(*) FROM documents "
         "WHERE status = 'quarantined' GROUP BY quarantine_reason"
     ).fetchall()
@@ -68,28 +95,28 @@ def test_quarantined_documents_have_all_eight_corrupt_reasons_accounted_for(
 
 
 def test_report_balance_input_files_equals_duplicates_plus_unique(
-    conn: sqlite3.Connection,
+    corpus_conn: sqlite3.Connection,
 ) -> None:
-    stats = build_inventory(conn, CORPUS)
-    (input_files,) = conn.execute("SELECT COUNT(*) FROM files").fetchone()
-    (unique_documents,) = conn.execute("SELECT COUNT(*) FROM documents").fetchone()
-    assert stats.input_files == input_files
-    assert stats.unique_documents == unique_documents
+    (input_files,) = corpus_conn.execute("SELECT COUNT(*) FROM files").fetchone()
+    (unique_documents,) = corpus_conn.execute(
+        "SELECT COUNT(*) FROM documents"
+    ).fetchone()
     duplicate_files = input_files - unique_documents
+    assert input_files == 48
+    assert unique_documents == 38
     assert duplicate_files == 10
 
 
 def test_eml_with_real_attachment_records_content_source(
-    conn: sqlite3.Connection,
+    corpus_conn: sqlite3.Connection,
 ) -> None:
-    build_inventory(conn, CORPUS)
-    (content_source,) = conn.execute(
+    (content_source,) = corpus_conn.execute(
         "SELECT content_source FROM files WHERE path = "
         "'Faktury/Kopie zapasowe/Faktura_FV_2024_03_018_mailem.eml'"
     ).fetchone()
     assert content_source == "eml_attachment"
 
-    (content_source,) = conn.execute(
+    (content_source,) = corpus_conn.execute(
         "SELECT content_source FROM files WHERE path = "
         "'Faktury/2024/Dostawcy zewnętrzni/Faktura_FV_2024_03_018.pdf'"
     ).fetchone()
@@ -183,8 +210,6 @@ def test_zip_entry_with_path_traversal_name_is_processed_safely(
 def test_oversized_zip_entry_is_quarantined_without_reading(
     conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import extractor.inventory as inventory_module
-
     monkeypatch.setattr(inventory_module, "MAX_ENTRY_BYTES", 10)
 
     archive = tmp_path / "archive.zip"
@@ -199,6 +224,83 @@ def test_oversized_zip_entry_is_quarantined_without_reading(
     ).fetchone()
     assert reason == "corrupt_file"
     assert size_bytes == len(b"this content is longer than ten bytes")
+
+
+def test_materialize_entry_rejects_when_head_alone_exceeds_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The initial head read (up to HEAD_SAMPLE_SIZE bytes) must be checked
+    against MAX_ENTRY_BYTES too, not just subsequent streaming reads —
+    otherwise an entry sized between a (sufficiently lowered) ceiling and
+    HEAD_SAMPLE_SIZE would bypass the guard entirely, since the whole
+    stream is consumed by that first read and nothing reaches the loop
+    that checks the rest. Not reachable with the real 512MB default
+    (always far bigger than HEAD_SAMPLE_SIZE's 8192), but a real gap for
+    whatever future config wires this constant down to.
+    """
+    monkeypatch.setattr(inventory_module, "MAX_ENTRY_BYTES", 100)
+
+    content = b"x" * 1000  # > the lowered ceiling, but read whole in one head call
+
+    entry = inventory_module.RawEntry(
+        path="small_but_over.txt",
+        size_hint=len(content),
+        oversized=False,
+        open_stream=lambda: io.BytesIO(content),
+        real_path=None,
+    )
+
+    with pytest.raises(inventory_module._EntryTooLarge):
+        inventory_module._materialize_entry(entry)
+
+
+def test_materialize_entry_cleans_up_temp_file_on_oversized_pdf_spool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """White-box: a PDF/DOCX entry (spooled to a temp file, since zip input
+    has no standalone path) that trips the size ceiling mid-stream must not
+    leave the partial spool file behind. Exercises the failure branch
+    directly, since a well-formed zip's declared size never lies in a way
+    that reaches this path through the normal build_inventory route.
+
+    Sized so the initial head read (HEAD_SAMPLE_SIZE bytes) stays under the
+    lowered ceiling and spooling begins — the overage is only discovered
+    once the remaining bytes are streamed in, after a temp file exists.
+    """
+    monkeypatch.setattr(inventory_module, "MAX_ENTRY_BYTES", 10_000)
+
+    big_pdf_like = (
+        b"%PDF-1.4\n" + b"x" * 20_000
+    )  # > HEAD_SAMPLE_SIZE and > the lowered ceiling
+
+    def open_stream():
+        return io.BytesIO(big_pdf_like)
+
+    entry = inventory_module.RawEntry(
+        path="big.pdf",
+        size_hint=len(big_pdf_like),
+        oversized=False,
+        open_stream=open_stream,
+        real_path=None,
+    )
+
+    real_named_temp_file = tempfile.NamedTemporaryFile
+    created_paths: list[Path] = []
+
+    def spying_named_temp_file(*args: object, **kwargs: object):
+        tmp = real_named_temp_file(*args, **kwargs)
+        created_paths.append(Path(tmp.name))
+        return tmp
+
+    monkeypatch.setattr(
+        inventory_module.tempfile, "NamedTemporaryFile", spying_named_temp_file
+    )
+
+    with pytest.raises(inventory_module._EntryTooLarge):
+        inventory_module._materialize_entry(entry)
+
+    assert created_paths
+    assert all(not p.exists() for p in created_paths)
 
 
 def test_directory_and_zip_of_same_content_agree_on_identity(
@@ -228,3 +330,128 @@ def test_directory_and_zip_of_same_content_agree_on_identity(
 def test_invalid_input_path_raises(tmp_path: Path, conn: sqlite3.Connection) -> None:
     with pytest.raises(ValueError, match="directory or a zip archive"):
         build_inventory(conn, tmp_path / "does-not-exist")
+
+
+# --- Stage 3: subprocess isolation + timeout ------------------------------
+
+
+def _rwt_quick_ok(queue) -> None:
+    queue.put(("ok", "hi", "own"))
+
+
+def _rwt_hangs_forever(queue) -> None:
+    time.sleep(1000)
+
+
+def _rwt_crashes(queue) -> None:
+    raise RuntimeError("boom")
+
+
+def _rwt_big_payload(queue) -> None:
+    # Bigger than a typical OS pipe buffer (64KB) — a real PDF's extracted
+    # text easily exceeds that. Exercises the queue-before-join ordering
+    # that avoids the put()-blocks/join()-waits deadlock.
+    queue.put(("ok", "x" * 5_000_000, "own"))
+
+
+def test_run_with_timeout_returns_payload_on_success() -> None:
+    assert _run_with_timeout(_rwt_quick_ok, (), timeout_s=5) == (
+        "ok",
+        ("ok", "hi", "own"),
+    )
+
+
+def test_run_with_timeout_does_not_deadlock_on_large_payload() -> None:
+    outcome = _run_with_timeout(_rwt_big_payload, (), timeout_s=5)
+    assert outcome[0] == "ok"
+    assert len(outcome[1][1]) == 5_000_000
+
+
+def test_run_with_timeout_kills_hung_process_and_reports_timeout() -> None:
+    t0 = time.monotonic()
+    outcome = _run_with_timeout(_rwt_hangs_forever, (), timeout_s=1)
+    elapsed = time.monotonic() - t0
+    assert outcome == ("timeout", None)
+    assert elapsed < 15  # actually killed, not left to run until some OS default
+
+
+def test_run_with_timeout_reports_crash_with_nonzero_exitcode() -> None:
+    outcome = _run_with_timeout(_rwt_crashes, (), timeout_s=5)
+    assert outcome[0] == "crashed"
+    assert outcome[1] not in (0, None)
+
+
+def test_extraction_timeout_quarantines_as_parse_timeout(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """Real (not mocked) end-to-end run against an impossibly small
+    timeout: no extraction can finish inside it, proving the budget is
+    actually enforced through build_inventory, not just by the primitive.
+    """
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "a.txt").write_text("kwota brutto 123,45 zl", encoding="utf-8")
+
+    stats = build_inventory(conn, src, timeout_s=0.0001)
+    assert stats.quarantined == 1
+    (reason,) = conn.execute("SELECT quarantine_reason FROM documents").fetchone()
+    assert reason == "parse_timeout"
+
+
+def test_subprocess_crash_quarantines_as_corrupt_file(
+    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        inventory_module,
+        "_run_with_timeout",
+        lambda target, args, timeout_s: ("crashed", 1),
+    )
+
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "a.txt").write_text("some content", encoding="utf-8")
+
+    build_inventory(conn, src)
+    (reason,) = conn.execute("SELECT quarantine_reason FROM documents").fetchone()
+    assert reason == "corrupt_file"
+
+
+def test_large_real_pdf_is_not_corrupted_by_truncation(
+    corpus_conn: sqlite3.Connection,
+) -> None:
+    """Umowa_U_2024_11_002.pdf is 286 pages. Reading it via a truncated
+    byte buffer risked landing mid xref-table (the bug Stage 3's native
+    path reading fixes) — confirms it's processed normally, not quarantined.
+    """
+    (status,) = corpus_conn.execute(
+        "SELECT d.status FROM documents d JOIN files f ON f.document_id = d.id "
+        "WHERE f.path = 'Umowy/Załączniki/2024/Umowa_U_2024_11_002.pdf'"
+    ).fetchone()
+    assert status == "pending"
+
+
+def test_zip_sourced_pdf_spools_to_temp_file_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_named_temp_file = tempfile.NamedTemporaryFile
+    created_paths: list[Path] = []
+
+    def spying_named_temp_file(*args: object, **kwargs: object):
+        tmp = real_named_temp_file(*args, **kwargs)
+        created_paths.append(Path(tmp.name))
+        return tmp
+
+    monkeypatch.setattr(
+        inventory_module.tempfile, "NamedTemporaryFile", spying_named_temp_file
+    )
+
+    pdf_bytes = (CORPUS / "Umowy/Załączniki/2024/Umowa_U_2024_12_017.pdf").read_bytes()
+    archive = tmp_path / "archive.zip"
+    _write_zip(archive, {"doc.pdf": pdf_bytes})
+
+    conn = connect(tmp_path / "test.sqlite")
+    stats = build_inventory(conn, archive)
+
+    assert stats.quarantined == 0
+    assert created_paths  # confirms the spooling path was actually exercised
+    assert all(not p.exists() for p in created_paths)
