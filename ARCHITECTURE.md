@@ -1,9 +1,9 @@
 # Architecture
 
-Status: Stages 0–3 built (skeleton, SQLite schema, inventory + dedup,
-hardened extraction). This document grows with each stage; it does not yet
-cover the model backend, orchestration/resume, or budget enforcement
-(Stages 5–7).
+Status: Stages 0–4 built (skeleton, SQLite schema, inventory + dedup,
+hardened extraction, context windowing). This document grows with each
+stage; it does not yet cover the model backend, orchestration/resume, or
+budget enforcement (Stages 5–7).
 
 ## Key decisions
 
@@ -16,24 +16,21 @@ collapse into one quarantined document with no extra logic.
 
 **Two-level dedup**: byte sha256 first (exact copies, cheap), then a hash
 of normalised text (NFC, whitespace-collapsed, case-folded, decorative
-divider lines like `====` stripped). Deliberately narrow — no fuzzy/
-near-duplicate matching. Case-folding and divider-stripping were added
-only once needed to dedup one letter rendered to `.docx`/`.html`/`.txt`
-with different per-format capitalisation; matching near-identical invoices
-from one template is explicitly not attempted, since those must stay
-distinct documents.
+divider lines like `====` stripped) — added only once needed to dedup one
+letter rendered to `.docx`/`.html`/`.txt` with different per-format
+capitalisation. Deliberately narrow: matching near-identical invoices from
+one template is explicitly not attempted, since those must stay distinct.
 
 **Schema invariants are CHECK constraints, not just application logic**:
 `quarantined ⟺ has a reason` (closed enum), `done ⟹ doc_type is set`.
 
 **`.eml` attachment handling**: a real, extractable attachment's text —
 not the covering note — becomes the file's content (an email forwarding an
-invoice IS that invoice); otherwise the body is used. The attachment's
-declared filename is never used to build a filesystem path, which
-neutralises path-traversal-shaped names structurally rather than via
-sanitisation. `files.content_source` records which source won, purely for
-`sqlite3` inspectability — `files.path` always stays the `.eml`'s own real
-path, so `eval`'s join against `expected.jsonl` needs no synthetic path.
+invoice IS that invoice). Its declared filename is never used to build a
+filesystem path, neutralising path-traversal-shaped names structurally
+rather than via sanitisation. `files.content_source` records which source
+won, purely for `sqlite3` inspectability; `files.path` stays the `.eml`'s
+own real path either way, so `eval`'s join needs no synthetic path.
 
 **Model/backend** (config-selectable, per requirement 2 — not yet wired):
 `llama-server` primary, Ollama secondary, `fake` for tests. Concurrent
@@ -41,22 +38,30 @@ requests to the model is a backend server-slot parameter, not `--workers`;
 conflating the two would queue requests past their timeout for no gain.
 
 **Extraction runs isolated per file, in a subprocess with a wall-clock
-timeout** (`multiprocessing`, forced `spawn` on every platform — matches
-macOS's own default, so pickling bugs surface in dev). A stuck C call
-inside pypdfium2 can't be interrupted by a Python-level timeout, so this
-has to wrap extraction from one layer up. A hang past the timeout kills
-the process (`parse_timeout`); a crash is `corrupt_file`. The parent reads
-the child's result queue *before* joining it — a payload bigger than the
-OS pipe buffer (real PDF text easily is) blocks the child in `put()` until
-read, so joining first deadlocks the two against each other.
+timeout** (`multiprocessing`, forced `spawn` everywhere — matches macOS's
+own default). A stuck C call inside pypdfium2 can't be interrupted by a
+Python-level timeout, so this has to wrap extraction from one layer up: a
+hang past the timeout kills the process (`parse_timeout`); a crash is
+`corrupt_file`. The parent reads the child's result queue *before* joining
+it — a payload bigger than the OS pipe buffer (real PDF text easily is)
+blocks the child in `put()` until read, so joining first would deadlock
+the two.
 
-**Materialisation matches each format's needs.** Directory input already
-has a real path, so PDF/DOCX open there directly — their structural data
-(zip central directory, PDF xref table) lives at the file's *end*, so any
-truncated read risks corrupting exactly those bytes. Zip input has no
-standalone path; PDF/DOCX entries from a zip spool to a temp file first
-(same guarantee), while TXT/HTML — genuinely prefix-truncatable — stay a
-bounded 8MB in-memory buffer, no disk I/O.
+**Materialisation matches each format's needs.** Directory input has a
+real path, so PDF/DOCX open it directly — their structural data (zip
+central directory, PDF xref table) lives at the file's *end*, so a
+truncated read risks corrupting exactly those bytes. Zip-sourced PDF/DOCX
+spool to a temp file first for the same guarantee; TXT/HTML — genuinely
+prefix-truncatable — stay a bounded 8MB in-memory buffer.
+
+**Context windowing uses a character budget, not tokens** — no model is
+pinned yet (Stage 5's job). Long documents get head (35%) + tail (25%) +
+budget-bounded windows around keyword/regex-candidate hits in the middle,
+so a field mentioned once, deep in a 286-page contract, still reaches the
+model. Candidate regexes (NIP/date/amount shapes) are deliberately
+imprecise — matching decoys too is fine, since windowing only needs anchor
+positions; Stage 6 will reuse the same module where value precision
+actually matters.
 
 ## Known limitations
 
@@ -69,6 +74,9 @@ bounded 8MB in-memory buffer, no disk I/O.
   the zip handle, never extracted to disk, so zip-slip has no attack
   surface to begin with; an oversized declared entry is rejected before
   any decompression (zip-bomb guard).
+- Windowing's char budget (~4 chars/token) is a proxy nothing enforces
+  against a real model's context limit yet — Stage 5 replaces it with
+  actual tokenizer counts.
 
 ## Throughput bottleneck (requirement 5)
 
