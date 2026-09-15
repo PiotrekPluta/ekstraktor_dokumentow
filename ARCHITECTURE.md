@@ -1,9 +1,9 @@
 # Architecture
 
 Status: Stages 0–4 built (skeleton, SQLite schema, inventory + dedup,
-hardened extraction, context windowing). This document grows with each
-stage; it does not yet cover the model backend, orchestration/resume, or
-budget enforcement (Stages 5–7).
+hardened extraction, context windowing), plus Stage 5a (LLM client
+interface + `fake` backend). Real backend wiring, model pinning (5b),
+orchestration/resume, and budget enforcement (Stages 6–7) aren't built yet.
 
 ## Key decisions
 
@@ -32,10 +32,41 @@ rather than via sanitisation. `files.content_source` records which source
 won, purely for `sqlite3` inspectability; `files.path` stays the `.eml`'s
 own real path either way, so `eval`'s join needs no synthetic path.
 
-**Model/backend** (config-selectable, per requirement 2 — not yet wired):
-`llama-server` primary, Ollama secondary, `fake` for tests. Concurrent
-requests to the model is a backend server-slot parameter, not `--workers`;
-conflating the two would queue requests past their timeout for no gain.
+**Model/backend** (config-selectable, per requirement 2): `llama-server`
+primary, Ollama secondary — both deferred to Stage 5b, since no model is
+pinned yet (below). `fake` is built (Stage 5a) and is the default.
+Concurrent requests to the model is a backend server-slot parameter, not
+`--workers`; conflating the two would queue requests past their timeout
+for no gain.
+
+**Retry/backoff/circuit-breaking is one shared wrapper around every
+backend, not per-backend logic.** `ResilientLLMClient` decorates any
+`LLMClient` (`fake` today; `llama_server`/`ollama` will be no different
+once built) with exponential backoff up to a retry cap, then a circuit
+breaker that opens after N *consecutive* failures. Once open it stays
+open for the rest of the process — no half-open retry attempt mid-run;
+recovery is a resume starting a fresh client with a fresh breaker, not a
+cooldown timer within one run. This directly implements requirement 5's
+"transient unavailability must not lose a document or hang forever": a
+tripped breaker surfaces as `LLMBackendUnavailable`, which Stage 7 will
+map to `stop_reason=backend_unavailable` with the in-flight document
+still `pending`, never lost.
+
+**The `fake` backend is a first-class, config-selectable backend, not
+just a test double.** It returns a canned response and counts every call
+(`.calls`), which is exactly what Stage 9's resumability test needs ("no
+repeated model calls for completed documents"). It can also be configured
+to fail on demand (`fail_first_n`, `always_fail`, a custom
+`error_factory`), so the retry/circuit-breaker paths — and, once Stage 7
+exists, the whole `run`/resume/`stop_reason=backend_unavailable` path —
+are testable end to end without ever touching a real model.
+
+**`LLMRequest`/`LLMResponse` are deliberately generic**: a prompt string,
+a JSON schema dict, a token cap in; response text plus token counts out.
+The client layer has no notion of the eight extraction fields — building
+the prompt from windowed context (Stage 4's output) and parsing/validating
+the response into those fields belongs to Stage 6/7, not here. This keeps
+the backend abstraction reusable regardless of what's being asked of it.
 
 **Extraction runs isolated per file, in a subprocess with a wall-clock
 timeout** (`multiprocessing`, forced `spawn` everywhere — matches macOS's
@@ -55,7 +86,7 @@ spool to a temp file first for the same guarantee; TXT/HTML — genuinely
 prefix-truncatable — stay a bounded 8MB in-memory buffer.
 
 **Context windowing uses a character budget, not tokens** — no model is
-pinned yet (Stage 5's job). Long documents get head (35%) + tail (25%) +
+pinned yet (Stage 5b's job). Long documents get head (35%) + tail (25%) +
 budget-bounded windows around keyword/regex-candidate hits in the middle,
 so a field mentioned once, deep in a 286-page contract, still reaches the
 model. Candidate regexes (NIP/date/amount shapes) are deliberately
@@ -75,12 +106,22 @@ actually matters.
   surface to begin with; an oversized declared entry is rejected before
   any decompression (zip-bomb guard).
 - Windowing's char budget (~4 chars/token) is a proxy nothing enforces
-  against a real model's context limit yet — Stage 5 replaces it with
-  actual tokenizer counts.
+  against a real model's context limit yet — Stage 5b replaces it with
+  actual tokenizer counts once a model is pinned.
+- No real backend is wired: `build_client` raises `NotImplementedError`
+  for `llama_server`/`ollama`. `config/default.toml` still has `TBD`
+  placeholders for model repo/revision/digest.
+- Retry count, backoff base, and circuit-breaker threshold are hardcoded
+  `ResilientLLMClient` defaults (3 retries, 1s base, 5 consecutive
+  failures), not yet exposed through `config/default.toml`.
+- JSON-schema-constrained output isn't enforced anywhere yet — the `fake`
+  backend ignores `LLMRequest.json_schema` entirely. Real enforcement is
+  backend-specific (Ollama takes it in `format`, `llama-server` in
+  `json_schema`, per docs/PROJECT_NOTES.md §4) and belongs to Stage 5b.
 
 ## Throughput bottleneck (requirement 5)
 
-Design intent, to confirm once Stage 5 lands: one inference server, one
+Design intent, to confirm once Stage 5b lands: one inference server, one
 GPU. Prompt processing is compute-bound, so parallel server slots barely
 help beyond a small number — near-sequential throughput should be assumed.
 The dominant lever on latency is context size sent to the model, not
