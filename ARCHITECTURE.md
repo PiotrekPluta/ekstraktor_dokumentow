@@ -2,13 +2,13 @@
 
 Status: Stages 0–4 built (skeleton, SQLite schema, inventory + dedup,
 hardened extraction, context windowing), plus Stage 5a (LLM client
-interface + `fake` backend) and Stage 5b (`llama-server` backend + a real,
-downloaded, sha256-verified model pin — the whole pipeline from
-`config/default.toml` through a real HTTP call was run end to end against
-the actual pinned model during this stage, not just against mocks), plus
-offline token counting via a committed `assets/tokenizer.json`. Ollama
-(the second backend requirement 2 needs), orchestration/resume, and budget
-enforcement aren't built yet.
+interface + `fake` backend), Stage 5b (`llama-server` backend + a real,
+downloaded, sha256-verified model pin), offline token counting via a
+committed `assets/tokenizer.json`, and Stage 5c (`ollama` backend, real
+public-registry tag pinned and verified). Every backend was run for real
+against the actual pinned model, not just mocks — requirement 2's
+"at least two real backends" bar is met (`llama_server` + `ollama`).
+Orchestration/resume and budget enforcement aren't built yet.
 
 ## Key decisions
 
@@ -91,21 +91,54 @@ a reason neither should be treated as an exact oracle if Stage 6 ever
 wants precise counts for something other than windowing.
 
 **Backend selection** (config-selectable, per requirement 2): `llama-server`
-is now the real, working default; `fake` remains for tests. Ollama is the
-second backend requirement 2 needs — a separate follow-up stage, not
-started. Concurrent requests to the model is a backend server-slot
-parameter, not `--workers`; conflating the two would queue requests past
-their timeout for no gain. Starting/stopping the `llama-server` process
-itself is not this client's job — `LlamaServerClient` only ever talks to
-a server already listening on `config.backend.llama_server.host:port`;
-process lifecycle belongs to Stage 7/CLI.
+is the real, working default; `ollama` is the second real backend
+(requirement 2's bar is met); `fake` remains for tests. Concurrent
+requests to the model is a backend server-slot parameter, not `--workers`;
+conflating the two would queue requests past their timeout for no gain.
+Starting/stopping either server process is not these clients' job —
+`LlamaServerClient`/`OllamaClient` only ever talk to a server already
+running; process lifecycle belongs to Stage 7/CLI.
+
+**Ollama pin: the public `speakleash/bielik-4.5b-v3.0-instruct:q8_0`
+registry tag, not a locally-made import name.** Verified directly against
+`registry.ollama.ai`'s Docker-registry-v2-compatible manifest API (no full
+pull needed just to check it): the model layer's digest is
+`sha256:562f2291...` — byte-identical to the GGUF already pinned for
+`llama_server`, confirming both backends serve the exact same published
+weights. `model_digest` in config is the manifest's `ollama-content-digest`
+response header, the value a real `ollama pull` by a reviewer would
+produce — not something computed locally, which would only be reproducible
+by someone importing the identical way. `OllamaClient` was verified for
+real regardless: the actual GGUF already downloaded for `llama_server` was
+imported into a local Ollama daemon via a Modelfile (`FROM <path>`) instead
+of pulling the registry copy again — same weights, zero duplicate ~5.1GB
+transfer — and a real request through
+`config → build_client → complete()` returned correct schema-constrained
+JSON. One real, generally-useful finding from that: a cold-start `/api/generate`
+call (first inference after import, loading a 4.5B model on CPU) took
+~107s — comfortably past a naive 60s client timeout, which fired and
+aborted the load correctly (confirmed by the server's own log:
+"client connection closed before llama-server finished loading"). Not a
+bug — `LLMTimeout` did exactly its job — but a concrete number for
+whatever default per-request timeout Stage 7 ultimately picks.
+
+`OllamaClient` posts to `/api/generate` with `"stream": false` (its
+default is streamed NDJSON, which this client — like `LlamaServerClient`
+— deliberately doesn't handle, wanting one complete response per call) and
+puts the JSON schema in Ollama's `format` field (`PROJECT_NOTES.md` §4:
+"Ollama takes a JSON Schema in format"). No `count_tokens` method here,
+unlike `LlamaServerClient`: Ollama exposes no `/tokenize`-equivalent, but
+doesn't need one — `extractor.tokenizer`'s offline counting is the same
+Bielik tokenizer regardless of which server runs it, so it already covers
+this backend too.
 
 **Retry/backoff/circuit-breaking is one shared wrapper around every
 backend, not per-backend logic.** `ResilientLLMClient` decorates any
-`LLMClient` — `fake` and `llama_server` today, proven identically against
-both (the same `tests/test_llm_resilience.py` patterns re-run against
-`LlamaServerClient` over `httpx.MockTransport` in
-`tests/test_llm_llama_server.py`) — with exponential backoff up to a retry
+`LLMClient` — `fake`, `llama_server`, and `ollama` alike, proven
+identically against all three (the same `tests/test_llm_resilience.py`
+patterns re-run over `httpx.MockTransport` in both
+`tests/test_llm_llama_server.py` and `tests/test_llm_ollama.py`) — with
+exponential backoff up to a retry
 cap, then a circuit breaker that opens after N *consecutive* failures.
 Once open it stays open for the rest of the process — no half-open retry
 attempt mid-run;
@@ -175,23 +208,32 @@ precision actually matters.
   are tested, but nothing calls `build_context` with either yet. That
   wiring — almost certainly the offline one, now that it costs no network
   round trip per document — is Stage 7's call.
-- Ollama (`build_client` raises `NotImplementedError` for it) is not
-  wired — requirement 2's two-backend bar isn't met yet. `config/default.toml`
-  still has `TBD` placeholders for its tag/digest. Separate follow-up stage.
 - Retry count, backoff base, and circuit-breaker threshold are hardcoded
   `ResilientLLMClient` defaults (3 retries, 1s base, 5 consecutive
-  failures), not yet exposed through `config/default.toml`. Same for
-  `LlamaServerClient`'s 60s per-request timeout.
-- `llama-server`'s process lifecycle (start with the pinned model + config,
-  health-check before sending traffic, stop on exit) isn't managed by this
-  tool yet — `LlamaServerClient` only ever talks to a server already
-  running. Verified manually this stage (started it by hand, ran a real
-  request through the full `config → build_client → complete()` pipeline);
-  Stage 7/CLI needs to automate that start.
+  failures), not yet exposed through `config/default.toml`. Same for both
+  clients' 60s/80s-ish per-request timeouts — and the real ~107s Ollama
+  cold-start measured this stage suggests the eventual default needs to be
+  well above a naive guess, or Stage 7 needs a separate, longer "model
+  loading" timeout distinct from the steady-state per-request one.
+- Neither `llama-server`'s nor Ollama's process/model lifecycle (start with
+  the pinned model, health-check before sending traffic, stop on exit) is
+  managed by this tool yet — both clients only ever talk to a server
+  already running. Verified manually both times (started each by hand, ran
+  a real request through the full `config → build_client → complete()`
+  pipeline); Stage 7/CLI needs to automate that start.
 - The model startup digest check `PROJECT_NOTES.md` §6 describes (compare
-  `vendor/versions.lock` against `config/default.toml`, refuse to run on
-  mismatch) doesn't exist yet — `fetch_runtime.py` writes the lock file,
-  nothing reads it back.
+  what's actually present against `config/default.toml`, refuse to run on
+  mismatch) doesn't exist for either backend yet — `fetch_runtime.py`
+  writes `vendor/versions.lock` for `llama_server` but nothing reads it
+  back; nothing queries Ollama's local `/api/tags` digest against the
+  pinned one either.
+- `fetch_runtime.py` still only fetches for `llama_server` (GGUF + server
+  binary) — it never runs `ollama pull` for the Ollama pin. A reviewer
+  who switches `config/default.toml` to `ollama` needs to pull the model
+  themselves; `setup.sh` doesn't do it for them. Deliberately out of scope
+  here (fetching both backends' models unconditionally would slow down
+  every setup for whichever backend isn't the active default) but worth
+  flagging as unaddressed.
 
 ## Throughput bottleneck (requirement 5)
 

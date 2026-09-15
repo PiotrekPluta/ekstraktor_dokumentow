@@ -12,6 +12,7 @@ from extractor.llm import (
 )
 from extractor.llm.fake import FakeLLMClient
 from extractor.llm.llama_server import LlamaServerClient
+from extractor.llm.ollama import OllamaClient
 from extractor.llm.resilience import ResilientLLMClient
 
 
@@ -44,7 +45,21 @@ def test_build_client_for_llama_server_backend() -> None:
     assert isinstance(client._inner, LlamaServerClient)  # testing the wiring itself
 
 
-@pytest.mark.parametrize("backend", ["ollama", "something_else"])
-def test_build_client_rejects_unwired_backends(backend: str) -> None:
+def test_build_client_for_ollama_backend() -> None:
+    raw = {
+        "backend": {
+            "ollama": {
+                "host": "127.0.0.1",
+                "port": 11434,
+                "model_tag": "speakleash/bielik-4.5b-v3.0-instruct:q8_0",
+            }
+        }
+    }
+    client = build_client(_config("ollama", raw))
+    assert isinstance(client, ResilientLLMClient)
+    assert isinstance(client._inner, OllamaClient)  # testing the wiring itself
+
+
+def test_build_client_rejects_unknown_backend() -> None:
     with pytest.raises(NotImplementedError):
-        build_client(_config(backend))
+        build_client(_config("something_else"))

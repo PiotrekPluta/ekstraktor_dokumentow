@@ -8,8 +8,11 @@
 # placeholders. Bielik 3.1 (announced for June 2026) was not released as
 # of this check, confirming the 3.0 line is still the right pin.
 #
-# Ollama is not wired yet (still TBD below) — a separate follow-up stage;
-# build_client() raises NotImplementedError for it until then.
+# Ollama pin (Stage 5c) verified directly against Ollama's own registry API
+# (registry.ollama.ai, Docker-registry-v2-compatible) on 2026-09-15: the
+# model layer's digest is sha256:562f2291... — identical to the GGUF
+# already pinned above for llama_server, confirming both backends serve the
+# exact same published weights, not just "the same model" in name.
 
 [run]
 workers = 4
@@ -49,8 +52,12 @@ ubuntu_x64_sha256 = "9813c959e82de406cddc562fcb48a42400df330a922326cf8b547859f60
 [backend.ollama]
 host = "127.0.0.1"
 port = 11434
-model_tag = "TBD"
-model_digest = "TBD"
+# Public, ollama-pull-able tag (not a self-made local import name) — a
+# reviewer gets this via `ollama pull`. Digest is the manifest's
+# ollama-content-digest header from registry.ollama.ai, not a locally
+# -computed value.
+model_tag = "speakleash/bielik-4.5b-v3.0-instruct:q8_0"
+model_digest = "88067a36fa44882b76463bb6befd0d8593a031032495fa48b9f957c3cb23858b"
 context_tokens = 2048
 
 # USD per 1,000,000 tokens. Local backends are 0.0 — the cost mechanism
