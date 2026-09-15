@@ -95,3 +95,20 @@ def test_real_long_pdf_nip_survives_windowing() -> None:
 
 def test_default_budget_is_documented_and_positive() -> None:
     assert DEFAULT_CHAR_BUDGET > 0
+
+
+def test_count_tokens_replaces_the_char_proxy_for_sizing() -> None:
+    # A counter reporting 1 token per character (an extreme, deliberately
+    # unrealistic ratio) should shrink the effective budget drastically
+    # compared to the default ~4-chars/token proxy — proves count_tokens
+    # actually drives the budget, not just gets called and ignored.
+    filler = "Lorem ipsum dolor sit amet consectetur. " * 200
+    generous = build_context(filler, char_budget=2000)
+    stingy = build_context(filler, char_budget=2000, count_tokens=len, token_budget=200)
+    assert len(stingy) < len(generous)
+
+
+def test_count_tokens_falls_back_to_default_on_degenerate_response() -> None:
+    filler = "Lorem ipsum dolor sit amet consectetur. " * 200
+    result = build_context(filler, count_tokens=lambda _text: 0)
+    assert result  # did not crash, produced something

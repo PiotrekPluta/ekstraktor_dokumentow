@@ -32,7 +32,9 @@ def test_run_parses_args_and_reads_config(tmp_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert "not implemented yet" in result.output
-    assert "backend='fake'" in result.output
+    assert (
+        "backend='llama_server'" in result.output
+    )  # Stage 5b: the real, pinned default
 
 
 def test_run_rejects_missing_input(tmp_path: Path) -> None:

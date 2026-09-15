@@ -1,9 +1,15 @@
 # Default run configuration.
 #
-# Backend/model selection is NOT pinned yet — see docs/PROJECT_NOTES.md §4.
-# TBD values below are placeholders so the config shape exists before Stage 5
-# (LLM client) fills them in with a real pinned model + digest, per
-# docs/ZADANIE.md requirement 2 ("model pinned to tag + digest").
+# Model/backend pinned for llama_server (Stage 5b, docs/PROJECT_NOTES.md §4):
+# speakleash/Bielik-4.5B-v3.0-Instruct, Q8_0 GGUF, Apache 2.0. Verified
+# directly against the Hugging Face API on 2026-09-15 (not carried over
+# from PROJECT_NOTES.md's possibly-stale notes) — model_revision and
+# model_sha256 below are the real pinned commit and file digest, not
+# placeholders. Bielik 3.1 (announced for June 2026) was not released as
+# of this check, confirming the 3.0 line is still the right pin.
+#
+# Ollama is not wired yet (still TBD below) — a separate follow-up stage;
+# build_client() raises NotImplementedError for it until then.
 
 [run]
 workers = 4
@@ -13,16 +19,32 @@ workers = 4
 
 [backend]
 # One of: "fake" (tests, no network/model), "llama_server", "ollama".
-name = "fake"
+name = "llama_server"
 
 [backend.llama_server]
 host = "127.0.0.1"
 port = 8080
-model_repo = "TBD"       # Hugging Face repo, e.g. speakleash/Bielik-4.5B-v3.0-Instruct-GGUF
-model_revision = "TBD"   # pinned commit, not a branch
-model_file = "TBD"
-model_sha256 = "TBD"
+model_repo = "speakleash/Bielik-4.5B-v3.0-Instruct-GGUF"
+model_revision = "3ee7b47bcd0ad7bc6a4c45bb7bad3e0b2fe066ad"  # pinned commit, not a branch
+model_file = "Bielik-4.5B-v3.0-Instruct.Q8_0.gguf"
+model_sha256 = "562f2291de257890adf2b4a914da8b194affe6a7a838a6b7ef3d342f306c1b7f"
+model_size_bytes = 5061215424
+# Server's allocated context (--ctx-size), not windowing's own char/token
+# budget: 2048 leaves headroom over the ~1500-2000 token/doc design target
+# (docs/PROJECT_NOTES.md §4) without allocating KV cache for the model's
+# full 8192-token capability, which this tool's windowing never needs.
 context_tokens = 2048
+
+[backend.llama_server.server_binary]
+# Prebuilt llama-server from a pinned ggml-org/llama.cpp release (per-commit
+# "b<N>" tags with real binary assets — the "vX.Y.Z" releases do not carry
+# them). Checksums computed locally after downloading each asset, not
+# copied from anywhere — llama.cpp publishes no checksums file.
+release_tag = "b10985"
+macos_arm64_asset = "llama-b10985-bin-macos-arm64.tar.gz"
+macos_arm64_sha256 = "af0c49bbc35add2cdfcdfd9b6fd1fa6d30a9087d4950561fbd6ebda37bd4fe2d"
+ubuntu_x64_asset = "llama-b10985-bin-ubuntu-x64.tar.gz"
+ubuntu_x64_sha256 = "9813c959e82de406cddc562fcb48a42400df330a922326cf8b547859f609ee5e"
 
 [backend.ollama]
 host = "127.0.0.1"
