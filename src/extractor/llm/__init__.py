@@ -1,6 +1,6 @@
-"""Stage 5: LLM client. `fake` (5a) and `llama_server` (5b) are built;
-`ollama` is a separate follow-up stage — `build_client` raises
-`NotImplementedError` for it until then.
+"""Stage 5: LLM client. `fake` (5a), `llama_server` (5b), and `ollama`
+(5c) are all built and config-selectable — requirement 2's "at least two
+real backends" bar is met by `llama_server` + `ollama`.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from extractor.llm.client import (
 )
 from extractor.llm.fake import FakeLLMClient
 from extractor.llm.llama_server import LlamaServerClient
+from extractor.llm.ollama import OllamaClient
 from extractor.llm.resilience import CircuitBreaker, ResilientLLMClient
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "LLMResponse",
     "LLMTimeout",
     "LlamaServerClient",
+    "OllamaClient",
     "ResilientLLMClient",
     "build_client",
 ]
@@ -46,7 +48,10 @@ def build_client(config: Config) -> LLMClient:
         llama_cfg = config.raw["backend"]["llama_server"]
         inner = LlamaServerClient(llama_cfg["host"], llama_cfg["port"])
         return ResilientLLMClient(inner)
-    raise NotImplementedError(
-        f"backend {config.backend!r} is not wired yet — ollama is a separate "
-        "follow-up stage"
-    )
+    if config.backend == "ollama":
+        ollama_cfg = config.raw["backend"]["ollama"]
+        inner = OllamaClient(
+            ollama_cfg["host"], ollama_cfg["port"], ollama_cfg["model_tag"]
+        )
+        return ResilientLLMClient(inner)
+    raise NotImplementedError(f"backend {config.backend!r} is not a known backend")
