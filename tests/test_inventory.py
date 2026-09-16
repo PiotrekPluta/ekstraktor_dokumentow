@@ -149,6 +149,42 @@ def test_duplicate_bytes_in_directory_dedup_to_one_document(
     assert input_files == 2
 
 
+def test_successful_extraction_stores_source_text(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """documents.source_text (Stage 7) stores the original, pre-
+    normalize_text() extraction: case and whitespace preserved, unlike
+    documents.id which is a hash of the normalised (casefolded) version.
+    """
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "a.txt").write_text("Faktura Testowa, Kwota 100 zł", encoding="utf-8")
+
+    build_inventory(conn, src)
+    (doc_id, source_text) = conn.execute(
+        "SELECT id, source_text FROM documents"
+    ).fetchone()
+
+    assert source_text == "Faktura Testowa, Kwota 100 zł"
+    assert doc_id != source_text  # id is a hash, not the text itself
+
+
+def test_quarantined_at_inventory_document_has_null_source_text(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "empty.txt").write_bytes(b"")
+
+    build_inventory(conn, src)
+    (status, source_text) = conn.execute(
+        "SELECT status, source_text FROM documents"
+    ).fetchone()
+
+    assert status == "quarantined"
+    assert source_text is None
+
+
 def test_directory_paths_are_relative_posix_and_nfc(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:

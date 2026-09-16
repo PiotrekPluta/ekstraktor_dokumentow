@@ -102,6 +102,10 @@ class ProcessedEntry:
     identity: str
     identity_kind: str  # 'text' | 'bytes'
     quarantine_reason: str | None
+    # Original (pre-normalize_text) extracted text, for documents.source_text
+    # (Stage 7): None exactly when quarantine_reason is set — nothing was
+    # ever successfully extracted to store.
+    source_text: str | None
 
 
 @dataclass(frozen=True)
@@ -213,7 +217,9 @@ def _process_entry(entry: RawEntry, timeout_s: float) -> ProcessedEntry:
         return _quarantine_without_reading(entry, "corrupt_file")
 
     try:
-        text, content_source, reason = _extract_via_subprocess(fmt, source, timeout_s)
+        text, raw_text, content_source, reason = _extract_via_subprocess(
+            fmt, source, timeout_s
+        )
     finally:
         if cleanup_path is not None:
             cleanup_path.unlink(missing_ok=True)
@@ -228,6 +234,7 @@ def _process_entry(entry: RawEntry, timeout_s: float) -> ProcessedEntry:
             identity=byte_sha256,
             identity_kind="bytes",
             quarantine_reason=reason,
+            source_text=None,
         )
 
     identity = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -240,6 +247,7 @@ def _process_entry(entry: RawEntry, timeout_s: float) -> ProcessedEntry:
         identity=identity,
         identity_kind="text",
         quarantine_reason=None,
+        source_text=raw_text,
     )
 
 
@@ -333,6 +341,7 @@ def _quarantine_without_reading(entry: RawEntry, reason: str) -> ProcessedEntry:
         identity=fallback_id,
         identity_kind="bytes",
         quarantine_reason=reason,
+        source_text=None,
     )
 
 
@@ -341,10 +350,13 @@ def _quarantine_without_reading(entry: RawEntry, reason: str) -> ProcessedEntry:
 
 def _extract_via_subprocess(
     fmt: Format, source: bytes | Path, timeout_s: float
-) -> tuple[str | None, str, str | None]:
-    """Returns (normalised_text, content_source, quarantine_reason) where
-    quarantine_reason is None on success and normalised_text is None
-    otherwise.
+) -> tuple[str | None, str | None, str, str | None]:
+    """Returns (normalised_text, raw_text, content_source, quarantine_reason)
+    where quarantine_reason is None on success and normalised_text/raw_text
+    are None otherwise. `raw_text` is the pre-normalize_text() extraction
+    result (documents.source_text, Stage 7) — kept alongside the normalised
+    identity text rather than instead of it, since windowing/validation want
+    case and structure preserved while identity hashing wants it stripped.
     """
     arg_source: bytes | str = (
         source if isinstance(source, (bytes, bytearray)) else str(source)
@@ -354,20 +366,20 @@ def _extract_via_subprocess(
     )
 
     if outcome[0] == "timeout":
-        return None, "own", "parse_timeout"
+        return None, None, "own", "parse_timeout"
     if outcome[0] == "crashed":
-        return None, "own", "corrupt_file"
+        return None, None, "own", "corrupt_file"
 
     payload = outcome[1]
     if payload is None:
         # Process exited cleanly but put nothing on the queue — treat the
         # same as a crash rather than trust an empty result.
-        return None, "own", "corrupt_file"
+        return None, None, "own", "corrupt_file"
     if payload[0] == "ok":
-        _, text, content_source = payload
-        return text, content_source, None
+        _, text, raw_text, content_source = payload
+        return text, raw_text, content_source, None
     _, reason = payload
-    return None, "own", reason
+    return None, None, "own", reason
 
 
 def _run_with_timeout(
@@ -443,7 +455,7 @@ def _extract_worker(
         normalized = normalize_text(result.text)
         if not normalized:
             raise ExtractionFailed("empty_text", "normalised text is empty")
-        queue.put(("ok", normalized, result.content_source))
+        queue.put(("ok", normalized, result.text, result.content_source))
     except ExtractionFailed as exc:
         queue.put(("failed", exc.reason))
     except Exception:  # noqa: BLE001 — last-resort net; a crash here must
@@ -455,13 +467,15 @@ def _insert_document(conn: sqlite3.Connection, entry: ProcessedEntry, now: str) 
     status = "quarantined" if entry.quarantine_reason else "pending"
     conn.execute(
         "INSERT OR IGNORE INTO documents "
-        "(id, identity_kind, status, quarantine_reason, summary, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, '', ?, ?)",
+        "(id, identity_kind, status, quarantine_reason, summary, source_text, "
+        "created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, '', ?, ?, ?)",
         (
             entry.identity,
             entry.identity_kind,
             status,
             entry.quarantine_reason,
+            entry.source_text,
             now,
             now,
         ),

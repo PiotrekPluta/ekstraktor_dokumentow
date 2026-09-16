@@ -19,6 +19,13 @@ class Config:
     budget: int | None
     backend: str
     raw: dict[str, Any]
+    # LLMRequest.max_tokens and the fixed worst-case component of every
+    # token_ledger reservation (Stage 7) — generous for one compact JSON
+    # object with a one-sentence summary, an order of magnitude below the
+    # ~1500-2000 token/doc input budget docs/PROJECT_NOTES.md §4 sets.
+    # Defaulted here (not just in TOML) so existing call sites that build a
+    # Config directly (tests) keep working unchanged.
+    max_output_tokens: int = 300
 
 
 def load_config(path: Path) -> Config:
@@ -34,4 +41,5 @@ def load_config(path: Path) -> Config:
         budget=run_cfg.get("budget") or None,
         backend=backend_cfg.get("name", "fake"),
         raw=data,
+        max_output_tokens=run_cfg.get("max_output_tokens", 300),
     )

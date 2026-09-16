@@ -1,16 +1,17 @@
 # Architecture
 
-Status: Stages 0–4 built (skeleton, SQLite schema, inventory + dedup,
-hardened extraction, context windowing), plus Stage 5a (LLM client
-interface + `fake` backend), Stage 5b (`llama-server` backend + a real,
-downloaded, sha256-verified model pin), offline token counting via a
-committed `assets/tokenizer.json`, Stage 5c (`ollama` backend, real
-public-registry tag pinned and verified), and Stage 6 (extraction schema +
-validation/normalisation). Every backend was run for real against the
-actual pinned model, not just mocks — requirement 2's "at least two real
-backends" bar is met (`llama_server` + `ollama`). Orchestration/resume and
-budget enforcement (Stage 7, which will also drive Stage 6's repair-attempt
-loop and wire quarantine writes) aren't built yet.
+Status: Stages 0–6 built (skeleton, SQLite schema, inventory + dedup,
+hardened extraction, context windowing, LLM client + `fake`/`llama_server`/
+`ollama` backends, extraction schema + validation/normalisation), plus
+**Stage 7 (orchestration, resume, budget)**: `extractor run` is now the
+real command — claim pending documents in deterministic order, build a
+windowed+prompted request, call the model, validate, repair-once-then-
+quarantine, write the result, all resumable after `SIGKILL` and bounded by
+`--limit`/`--budget`. Verified for real against the pinned `llama-server` +
+Bielik model, not just the `fake` backend (see "Stage 7 real-fixture
+verification" below) — this is also where a real, load-bearing bug was
+found and fixed: see the context-budget decision below. Report/`eval`
+(Stage 8) aren't built yet.
 
 ## Key decisions
 
@@ -280,6 +281,197 @@ test suite to verify ("no record other than that document's own was created
 or modified") — Stage 6's job is only to catch values that don't appear
 *anywhere* in the source at all.
 
+**Stage 7: `--limit`/`--budget` are cumulative across the whole db's
+history, not reset per `run` invocation.** The only reading consistent with
+requirement 4's "record set after any number of interruptions matches an
+uninterrupted run" holding unconditionally — three interrupted runs at
+`--limit 5` must not process 15 documents. `--limit` is enforced
+structurally: `orchestrate.run()` computes the target-id list once, up
+front, from `SELECT id FROM documents WHERE status='pending' ORDER BY id
+LIMIT (limit - already_attempted)`, where `already_attempted` is
+`COUNT(done) + COUNT(quarantined AND quarantine_reason='llm_invalid_output')`
+over the *entire* db. That query result is fixed before any worker starts,
+so the set of documents attempted this run cannot depend on `--workers` or
+on how many of those claims later fail and go back to `pending`.
+Inventory-time quarantines (`corrupt_file` etc.) never reached the LLM step
+and don't count against the limit. `--budget` gets the same cumulative
+treatment for free: `token_ledger.reserved_tokens` already accumulates
+across every `run_id`, so "spend so far" is `SUM(reserved_tokens)` over the
+whole table, checked live by a shared `_Accountant` before every
+reservation — enforced at runtime rather than pre-sized into the target
+list, since token cost depends on content in a way document *count*
+doesn't.
+
+**`documents.source_text` (Stage 7 addition to Stage 2/3's schema and
+`inventory.py`).** The original, pre-`normalize_text()` extracted text is
+now stored once at inventory time and reused by windowing/validation,
+rather than re-extracting the file a second time when orchestration needs
+it — the "100x scale" section below already flags per-file extraction
+overhead as a real cost; doing it twice would double it for nothing. `NULL`
+exactly when `identity_kind='bytes'` (quarantined before any text existed).
+
+**Threads, not processes, for the orchestration loop.** Per-document work
+here is dominated by an HTTP call to the model server (I/O-bound), unlike
+Stage 3's CPU/C-library-bound extraction subprocesses that need real
+process isolation to kill a hung pypdfium2 call. One `ResilientLLMClient`
+(and its one `CircuitBreaker`) is shared across every worker thread — a
+single "backend is down" signal, not one breaker per worker that would each
+independently need `failure_threshold` failures to notice the same outage.
+This made `CircuitBreaker`'s previously-unguarded state
+(`_consecutive_failures`/`_open`) a real concurrency bug once Stage 7 became
+the first caller to invoke `complete()` from multiple threads: fixed with a
+`threading.Lock` around each read-modify-write, verified by a dedicated
+20-thread concurrent-failure test (`test_concurrent_complete_calls_trip_
+breaker_exactly_once_no_race`) that would flake under a lost-increment race
+without the lock.
+
+**`llm_invalid_output` is reused for "no usable response after retries",
+not a new quarantine reason.** Two paths lead there: the model responded
+but the JSON stayed unusable even after one repair attempt, or
+`ResilientLLMClient.complete()` raised after exhausting its own retries
+without tripping the breaker — a document-scoped failure distinct from a
+whole-run `backend_unavailable` event. Both mean the same thing from the
+document's point of view: this document did not get a valid extraction.
+**A found, worth-naming edge case**: with a tight `failure_threshold`, the
+*specific* document whose attempt happens to be the one that pushes
+consecutive failures over the threshold correctly gets `backend_unavailable`
+and is released to `pending` — but a document that failed just *before*
+that point, whose own retry budget was exhausted first, can get individually
+quarantined as `llm_invalid_output` even though the underlying cause was the
+same backend outage. `ResilientLLMClient` has no way to know in advance
+which failure will be the last straw, so this is real, not merely
+hypothetical (`tests/test_orchestrate.py`'s backend-unavailable test had to
+be tuned — `max_retries >= failure_threshold` — specifically to avoid
+hitting it and assert the whole-run path instead). Not corrected: the
+alternative (treating every failure as potentially breaker-adjacent and
+never quarantining) would mean one persistently-malformed document could
+never be quarantined at all as long as the backend stays up. Stated here
+rather than silently accepted.
+
+**Token reservations stay conservative forever, never released.** A
+`token_ledger` row is inserted *before* every model call (one row per
+attempt: the initial call is `attempt=1`, a repair call is `attempt=2`,
+`UNIQUE(run_id, document_id, attempt)`). A process killed between the
+reservation and the response leaves `tokens_in`/`tokens_out`/`completed_at`
+all `NULL` — and it is never backed out: `SUM(reserved_tokens)` counts it
+forever, matching requirement 6's "the tool ends *before* the budget would
+be exceeded" literally rather than trying to detect and roll back an
+abandoned attempt.
+
+**Prompt design (`extractor/prompt.py`): ChatML, and the JSON schema is
+deliberately *not* embedded in the prompt text.** The first version did
+embed `ExtractedFields.model_json_schema()` inline (per the original plan),
+and a real-fixture run against the pinned `llama-server` (CLAUDE.md's
+"verify against real fixtures" rule) immediately caught why that was wrong:
+the schema alone costs 500-1300 tokens depending on formatting, and the
+full system prompt with it embedded came to ~2200 tokens — already over the
+server's pinned 2048-token `--ctx-size` *before a single token of document
+context or of the response*. Every request was rejected outright
+(`request (2400 tokens) exceeds the available context size (2048 tokens)`).
+Fix: the schema is only ever sent structurally, via `LLMRequest.json_schema`
+(which `LlamaServerClient`/`OllamaClient` already forward as the backend's
+own grammar-constrained-decoding parameter — confirmed in the real
+request's `generation_settings.grammar` field, a real GBNF grammar compiled
+from the schema); the prompt text only lists the eight field names and
+explains their *meaning* in prose (seller-not-buyer, the six-level currency
+precedence chain, derived-due-date reasoning) — the model doesn't need to
+see the raw schema twice to know what to fill in and how to name it.
+
+**`orchestrate._context_window_budget()`: the windowed-context token budget
+is computed per run, not hardcoded.** Directly downstream of the bug above:
+even after dropping the embedded schema, the system prompt is still ~1000
+tokens fixed overhead, and a repair turn adds the previous response
+(≤`max_output_tokens`) plus correction instructions on top. Sizing
+`windowing.build_context`'s `token_budget` off `windowing.DEFAULT_TOKEN_BUDGET`
+(1500) unconditionally would still blow a 2048-token `--ctx-size` once that
+overhead is added. Instead: `context_tokens` (from
+`config.raw["backend"][backend]["context_tokens"]`, defaulting to a large,
+effectively-unconstrained value for `fake`) minus the larger of
+`count_tokens(build_prompt(""))` / `count_tokens(build_repair_prompt("", "", ""))`
+minus `2 * max_output_tokens` (one for the repair turn's echoed-back
+previous response, one for the new completion) minus a small safety margin,
+floored at 200 tokens. Computed once per `run()` call (it depends only on
+config and the counter, not on any document) and threaded through to every
+worker/document alongside `count_tokens` itself.
+
+**Found via the same real-fixture pass, not yet fixed in code — a
+deployment/server-configuration concern rather than a Stage 7 logic bug**:
+`llama-server`'s `--ctx-size` is the *total* KV-cache budget shared across
+all of its parallel slots when `kv_unified=true` (its default), not a
+per-slot budget. Starting the server with `--ctx-size 2048` and its default
+`--parallel` (4) means each of the 4 concurrently-served requests only
+really has ~512 tokens of headroom, not 2048 — confirmed for real: four
+`--workers`-driven concurrent requests, each individually well under 2048
+tokens, still failed mid-decode with `Context size has been exceeded` once
+combined. `config/default.toml`'s `context_tokens` is a single number and
+`_context_window_budget()` (above) assumes it's what one request actually
+gets. This only reproduces under real concurrency (`--workers > 1` against
+a real backend with more than one server slot) — every automated test uses
+the `fake` backend, which has no concept of a shared KV cache, so nothing
+in the test suite catches this. The fix belongs wherever the server process
+itself gets started (`--ctx-size` should scale with `--parallel`, or
+`--parallel` should be pinned to `1`), which is already-documented as
+unowned below ("Neither `llama-server`'s nor Ollama's process/model
+lifecycle... is managed by this tool yet") — noted here specifically so
+that whoever writes that startup code knows to size `--ctx-size` as
+`context_tokens * n_slots`, not just `context_tokens`.
+
+**`FakeLLMClient` gained a `responses: list[LLMResponse]` sequencing mode**
+(returns them in order, then repeats the last) — needed to test the
+repair-attempt path (invalid JSON, then valid) without a second test
+double, and made thread-safe (`self.calls` appended under a lock) since
+Stage 7 is the first stage to share one `FakeLLMClient` across worker
+threads, the same way a real backend client would be.
+
+**Requirement 9 (2GB peak memory) is a design property, not enforced at
+runtime.** `ThreadPoolExecutor(max_workers=config.workers)` bounds how many
+documents' `source_text` and windowed context are ever held in memory at
+once to `--workers`, never the whole corpus — Stage 2/3 already streams
+input and caps extraction per file (`MAX_TEXT_CHARS`, `MAX_ENTRY_BYTES`), so
+Stage 7 doesn't undo that by loading everything up front. No new
+memory-limiting code was added; the brief tests this empirically at
+Stage 10 via `/usr/bin/time -l` on the real eval machine, not via an
+in-tool enforcer. "The process" is read as the whole process tree (main +
+any subprocess workers, per Stage 3's extraction subprocesses) — the
+conservative reading of an ambiguity `PROJECT_NOTES.md` §3 leaves open.
+
+**CLI**: `--workers`/`--limit`/`--budget` override `config/default.toml`'s
+`[run]` defaults when explicitly given (`--workers`'s CLI default changed
+from a hardcoded `4` to `None`, so "not given" is distinguishable from "given
+as 4"); when omitted, the config file's values apply. `extractor run` now
+does exactly what `docs/ZADANIE.md` §3 says — "process INPUT into DB,
+resuming any previous run found there" — as two steps in one command:
+`inventory.build_inventory` (idempotent, safe to redo) then
+`orchestrate.run`, both against the same db, via `extractor.db.connect` and
+`extractor.llm.build_client`.
+
+### Stage 7 real-fixture verification
+
+Run against the actual pinned model (Bielik-4.5B-v3.0-Instruct.Q8_0, via a
+locally-started `llama-server`), not just the `fake` backend, per CLAUDE.md's
+"verify against real fixtures" rule — this dev machine is x86_64 Linux,
+CPU-only, 4 threads, a different machine entirely from the M1 target, so
+timing numbers here are not representative of the eval machine, only
+correctness is. The schema-embedding bug above was found and fixed this
+way; after the fix, a real run through the actual CLI path
+(`inventory.build_inventory` → `orchestrate.run` → real `llama-server` →
+`validate_extraction` → db write, `--workers 1`, `--ctx-size 2048`,
+`--parallel 1`) completed two real corpus documents end-to-end with
+plausible, schema-valid output — including a genuinely correct answer on
+one of the corpus's adversarial currency-precedence cases
+(`Offer_facade_renovation.eml`, a Swedish counterparty: the model correctly
+returned `currency: "SEK"`, not `EUR`, which is exactly `docs/DATA_SPEC.md`
+§3.2's "no euro-zone assumption from an EU VAT prefix" trap case, resolved
+correctly from prose instructions alone with no schema decoding forced
+value). Per-request latency on this dev box (~140-280s for 150-300 output
+tokens, CPU-only, 4 threads, no GPU offload) is far above what the M1 target
+should see per `docs/PROJECT_NOTES.md` §5's estimates (~15s/doc for a 4.5B
+model) and is not a Stage 7 defect — it did surface that the default 60s
+per-request client timeout (Stage 5's `LlamaServerClient`/`OllamaClient`
+default, already flagged as unvalidated below) is too tight for *this*
+specific slow environment; not changed here since raising it without a
+measurement on real M1 hardware would just be a different unvalidated guess.
+
 ## Known limitations
 
 - No OCR: a scanned/image-only PDF is quarantined (`no_text_layer`).
@@ -291,11 +483,12 @@ or modified") — Stage 6's job is only to catch values that don't appear
   the zip handle, never extracted to disk, so zip-slip has no attack
   surface to begin with; an oversized declared entry is rejected before
   any decompression (zip-bomb guard).
-- Windowing's char-budget proxy (~4 chars/token) is still the *default* —
-  both real counters (offline `tokenizer.py`, live `/tokenize`) exist and
-  are tested, but nothing calls `build_context` with either yet. That
-  wiring — almost certainly the offline one, now that it costs no network
-  round trip per document — is Stage 7's call.
+- ~~Windowing's char-budget proxy is still the default~~ — resolved by
+  Stage 7: `orchestrate.default_token_counter()` wires the offline
+  `tokenizer.py` counter through as the real default, sized per run by
+  `_context_window_budget()` (see the Stage 7 decisions above). The proxy
+  remains reachable (`count_tokens=None` in tests, or a fork with no
+  `assets/tokenizer.json`) but is no longer what a real `run` uses.
 - Retry count, backoff base, and circuit-breaker threshold are hardcoded
   `ResilientLLMClient` defaults (3 retries, 1s base, 5 consecutive
   failures), not yet exposed through `config/default.toml`. Same for both
@@ -308,7 +501,12 @@ or modified") — Stage 6's job is only to catch values that don't appear
   managed by this tool yet — both clients only ever talk to a server
   already running. Verified manually both times (started each by hand, ran
   a real request through the full `config → build_client → complete()`
-  pipeline); Stage 7/CLI needs to automate that start.
+  pipeline, and again for Stage 7 through the full orchestration path —
+  see "Stage 7 real-fixture verification" below); whoever eventually
+  automates that start needs to size `--ctx-size` as
+  `context_tokens * n_slots`, not just `context_tokens` — see the Stage 7
+  decision on `llama-server`'s shared-KV-cache slots above, found by that
+  same real-fixture run.
 - The model startup digest check `PROJECT_NOTES.md` §6 describes (compare
   what's actually present against `config/default.toml`, refuse to run on
   mismatch) doesn't exist for either backend yet — `fetch_runtime.py`
@@ -322,12 +520,10 @@ or modified") — Stage 6's job is only to catch values that don't appear
   here (fetching both backends' models unconditionally would slow down
   every setup for whichever backend isn't the active default) but worth
   flagging as unaddressed.
-- `validate_extraction()` is not wired into anything yet — nothing calls
-  it with a real (or `fake`) LLM response, and nothing writes its output
-  into `documents` or maps `needs_repair=True` to an actual repair prompt
-  or `quarantine_reason='llm_invalid_output'`. That orchestration loop —
-  call the model, validate, retry once on `needs_repair`, then null/
-  quarantine — is Stage 7's.
+- ~~`validate_extraction()` is not wired into anything yet~~ — resolved by
+  Stage 7: `orchestrate._attempt()` calls it on every response, maps
+  `needs_repair=True` to one `build_repair_prompt()` call, and quarantines
+  as `llm_invalid_output` if that repair attempt is also unusable.
 - The ISO 4217 allowlist is a fixed, hand-maintained set of active
   alphabetic codes. It is not sourced from a machine-readable registry, so
   a currency that's added, split, or redenominated after this was written
@@ -338,6 +534,27 @@ or modified") — Stage 6's job is only to catch values that don't appear
   not that the model's specific value matches anything found there. A
   wholesale-fabricated-but-plausible amount on a document that legitimately
   discusses a different amount would not be caught by this check alone.
+- `_context_window_budget()`'s `2 * max_output_tokens` term (Stage 7) is a
+  conservative heuristic sized for the repair turn's worst case (a
+  near-`max_output_tokens`-length previous response, echoed back, plus a
+  new completion of the same cap), not an exact accounting of what a repair
+  prompt will actually cost. It errs toward leaving *less* room for document
+  context than strictly necessary on the common (no-repair) path, never
+  toward risking a context overflow — the direction that matters, since the
+  overflow this stage found and fixed silently dropped every request rather
+  than degrading gracefully.
+- `llama-server`'s shared-KV-cache-across-slots behaviour (`kv_unified`,
+  the decision above) means the practical, safe upper bound on `--workers`
+  against a real `llama_server` backend is capped by how the server process
+  was started, not by anything Stage 7 itself enforces or even inspects —
+  `orchestrate.py` has no way to know the running server's `--parallel`
+  value and doesn't try to. `--workers 16` (requirement 5's stability bar)
+  was exercised only against the `fake` backend, which has no such ceiling.
+- The circuit breaker's "last straw" attribution gap (a document whose own
+  retries exhaust just before the *next* document's failure would have
+  tripped the breaker gets individually quarantined instead of counted as
+  part of the same outage) is stated above as a deliberate non-fix, not
+  resolved.
 
 ## Throughput bottleneck (requirement 5)
 
@@ -349,13 +566,22 @@ documents instead of sending full text. `--workers` controls concurrency
 for everything *except* the model call; it doesn't increase model
 concurrency, a separate backend-side slot count.
 
-The request/response plumbing itself is confirmed, not just designed: a
-real request against the real pinned model, through the full
-`config → build_client → complete()` path, returned correct
-JSON-schema-constrained output. Wall-clock throughput against the M1
-budget (20 min / ~40 docs) is *not* confirmed — this dev environment is
-x86_64 Linux, CPU-only, a different machine entirely; the M1's actual
-numbers need `PROJECT_NOTES.md` §5's estimation approach or real hardware.
+The request/response plumbing is now confirmed end-to-end through
+orchestration itself, not just the client layer: a real `extractor run`
+against the real pinned model (see "Stage 7 real-fixture verification"
+above) produced correct, schema-valid, semantically-correct output —
+including a currency-precedence trap case resolved correctly from prose
+alone. Wall-clock throughput against the M1 budget (20 min / ~40 docs) is
+still *not* confirmed — this dev environment is x86_64 Linux, CPU-only, 4
+threads, a different machine entirely, and per-request latency observed
+here (~140-280s for 150-300 output tokens) is far outside what the M1
+target should see; the M1's actual numbers need `PROJECT_NOTES.md` §5's
+estimation approach or real hardware. `--workers` beyond the server's real
+`--parallel` slot count queues, as designed — but the server's `--ctx-size`
+also has to scale with `--parallel` (`kv_unified` shares one KV-cache budget
+across all slots), a real, found-not-designed-for constraint documented
+above; nothing currently sizes `--ctx-size` for a reviewer's eventual
+server-launch code.
 
 ## At 100× scale
 
@@ -371,3 +597,15 @@ startup, reimporting pypdfium2/python-docx) — negligible at 40 files, but
 4000 files means ~20 minutes of pure spawn overhead before any parsing.
 At that scale extraction would need a persistent worker pool instead of
 spawn-per-file, trading some isolation granularity for throughput.
+
+Stage 7's orchestration loop (one sqlite3 connection per worker thread,
+each write its own short `BEGIN IMMEDIATE ... COMMIT`, serialised by WAL +
+`busy_timeout`) is fine at 40 documents and `--workers` up to 16 — writes
+are short and infrequent relative to the model call that dominates wall
+time. At 100×, with many more workers needed to keep a batching-capable
+inference backend fed, single-writer SQLite becomes the bottleneck *before*
+the inference server does: every worker's claim/reserve/write still
+serialises through one file, and `busy_timeout`-based backoff turns into
+real queuing delay rather than the negligible cost it is today. This is the
+same "Postgres instead of SQLite" change already named above, motivated
+concretely by Stage 7's own write pattern rather than abstractly.

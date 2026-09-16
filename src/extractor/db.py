@@ -42,6 +42,13 @@ orchestration resets any `in_progress` row back to `pending` — a row in that
 state means a worker claimed it but we cannot tell whether the model call
 that would complete it actually happened, so it must be treated as not done
 (docs/ZADANIE.md §4: no repeated model calls for documents already `done`).
+
+`documents.source_text` (Stage 7): the original (pre-`normalize_text`)
+extracted text, populated once by `inventory.py` at Stage 2/3 time and reused
+by windowing/validation instead of re-extracting the file a second time —
+the same overhead ARCHITECTURE.md's "100x scale" section already flags.
+`NULL` exactly when `identity_kind = 'bytes'` (quarantined at inventory,
+nothing was ever extracted).
 """
 
 from __future__ import annotations
@@ -89,6 +96,7 @@ CREATE TABLE IF NOT EXISTS documents (
     gross_amount            TEXT,
     currency                TEXT,
     summary                 TEXT NOT NULL DEFAULT '',
+    source_text             TEXT,
     backend                 TEXT,
     model                   TEXT,
     run_id                  INTEGER REFERENCES runs(id),
@@ -143,11 +151,20 @@ def connect(path: Path) -> sqlite3.Connection:
     document's result", so requirement 8 (a document's content can only ever
     affect its own row) maps onto a single parameterised statement inside a
     single transaction rather than relying on driver-implicit ones.
+
+    `busy_timeout` (Stage 7): sqlite3's own default is 0 — a writer that
+    finds the db locked fails immediately rather than waiting. Stage 7 is
+    the first caller to open several connections against the same db
+    concurrently (one per worker thread), each wrapping its own short
+    `BEGIN IMMEDIATE ... COMMIT`, so a several-second timeout lets SQLite
+    itself serialise those writers instead of surfacing a spurious
+    "database is locked" error under `--workers > 1`.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, isolation_level=None)
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     return conn
