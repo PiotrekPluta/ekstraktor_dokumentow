@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -57,3 +59,28 @@ def test_json_schema_includes_all_eight_field_names() -> None:
         "summary",
     ):
         assert name in properties
+
+
+def test_gross_amount_pattern_has_no_llama_cpp_unsupported_syntax() -> None:
+    """llama.cpp's json-schema-to-grammar converter (what turns
+    `LLMRequest.json_schema` into grammar-constrained decoding on the
+    llama-server backend) doesn't support regex lookahead groups or `\\d`
+    shorthand — a live run against `vendor/llama-server` with Pydantic's
+    stock Decimal pattern logged "JSON schema conversion was incomplete:
+    ... unsupported group syntax, accepting any string", silently
+    dropping the constraint. This pins the schema to the safe subset.
+    """
+    schema = ExtractedFields.model_json_schema()
+    pattern = schema["properties"]["gross_amount"]["anyOf"][1]["pattern"]
+    assert "(?!" not in pattern
+    assert "(?=" not in pattern
+    assert "\\d" not in pattern
+
+
+def test_gross_amount_pattern_rejects_sign_or_dot_only_strings() -> None:
+    schema = ExtractedFields.model_json_schema()
+    pattern = re.compile(schema["properties"]["gross_amount"]["anyOf"][1]["pattern"])
+    for degenerate in ("", "-", "+", ".", "-.", "+."):
+        assert not pattern.match(degenerate)
+    for valid in ("861.00", "-450.00", ".5", "5.", "007.5", "1234"):
+        assert pattern.match(valid)

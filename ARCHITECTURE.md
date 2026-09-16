@@ -377,6 +377,27 @@ explains their *meaning* in prose (seller-not-buyer, the six-level currency
 precedence chain, derived-due-date reasoning) — the model doesn't need to
 see the raw schema twice to know what to fill in and how to name it.
 
+**`schema.py`'s `gross_amount` uses a hand-written json-schema pattern
+(`_GROSS_AMOUNT_SCHEMA`), not Pydantic's own `Decimal` pattern.** Found the
+same way, against the same real `llama-server`: since the schema is sent
+structurally as grammar (previous paragraph), `llama-server` logs "JSON
+schema conversion was incomplete: pattern `^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$`
+is not supported (unsupported group syntax), accepting any string" for
+Pydantic's stock Decimal pattern — llama.cpp's schema-to-GBNF converter
+doesn't support regex lookahead, so it silently drops the character-set
+constraint for that `anyOf` branch, meaning the grammar would let the
+model emit *any* string there, not just digit/sign/dot shapes (still
+caught downstream by `validation.py`'s `Decimal` parse, just later and
+noisier than necessary). Fix: `WithJsonSchema` overrides that one branch
+with a lookahead-free pattern of the same semantics (rejects sign/dot-only
+degenerates like `"-"`/`"."`/`""`, same as the lookahead did) — and avoids
+`\d` too, which this llama.cpp build's converter also rejects
+("unsupported escape"); `[0-9]` only. Verified against `vendor/llama-server`
+directly: the warning reproduces with the raw Pydantic schema and is gone
+with the replacement (`tests/test_schema.py` pins the pattern's shape, not
+the live warning, since the test suite may run without any backend
+available per CLAUDE.md's "no model/network/API key" rule).
+
 **`orchestrate._context_window_budget()`: the windowed-context token budget
 is computed per run, not hardcoded.** Directly downstream of the bug above:
 even after dropping the embedded schema, the system prompt is still ~1000
