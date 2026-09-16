@@ -4,11 +4,13 @@ Status: Stages 0–4 built (skeleton, SQLite schema, inventory + dedup,
 hardened extraction, context windowing), plus Stage 5a (LLM client
 interface + `fake` backend), Stage 5b (`llama-server` backend + a real,
 downloaded, sha256-verified model pin), offline token counting via a
-committed `assets/tokenizer.json`, and Stage 5c (`ollama` backend, real
-public-registry tag pinned and verified). Every backend was run for real
-against the actual pinned model, not just mocks — requirement 2's
-"at least two real backends" bar is met (`llama_server` + `ollama`).
-Orchestration/resume and budget enforcement aren't built yet.
+committed `assets/tokenizer.json`, Stage 5c (`ollama` backend, real
+public-registry tag pinned and verified), and Stage 6 (extraction schema +
+validation/normalisation). Every backend was run for real against the
+actual pinned model, not just mocks — requirement 2's "at least two real
+backends" bar is met (`llama_server` + `ollama`). Orchestration/resume and
+budget enforcement (Stage 7, which will also drive Stage 6's repair-attempt
+loop and wire quarantine writes) aren't built yet.
 
 ## Key decisions
 
@@ -192,6 +194,92 @@ deliberately imprecise — matching decoys too is fine, since windowing only
 needs anchor positions; Stage 6 will reuse the same module where value
 precision actually matters.
 
+**Stage 6's `validate_extraction()` is a pure function with no model call
+of its own.** It parses the model's raw JSON against
+`extractor.schema.ExtractedFields` (a Pydantic model whose
+`model_json_schema()` also *is* `LLMRequest.json_schema` — one schema
+drives both what's requested and what validates the response), normalises
+every field, and reports what's wrong. The repair-attempt retry loop that
+decides whether to re-prompt the model, null a field, or quarantine the
+document is Stage 7's job, since Stage 7 is the only layer already holding
+an `LLMClient` — this keeps Stage 6 testable with canned JSON strings, no
+`fake` backend needed, matching every other stage's "tests never call a
+real model" rule.
+
+**Field-level failures null just that field; only an unparseable
+`doc_type`/malformed JSON/empty summary is document-level.** This mirrors
+`documents`'s own CHECK constraint (`done ⟹ doc_type is set`) rather than
+inventing a second failure taxonomy: a document that can't produce a valid
+`doc_type` cannot become `done` and must go through repair-then-quarantine
+(`quarantine_reason='llm_invalid_output'`); a single field like
+`counterparty_name` failing its check is nulled and the document still
+completes normally, matching how routinely a field is legitimately `null`
+in a real document.
+
+**Per-field corroboration is not the same literal "occurs in source text"
+test for every field** — deliberately, because a literal substring check
+is only meaningful for values the model is expected to copy near-verbatim.
+`counterparty_name`/`counterparty_tax_id` get the strict check (these are
+exactly the two fields `PROJECT_NOTES.md` §8 names as the anti-injection
+target: "blocks both hallucination and an injected 'use this other
+company's NIP'"), with the NIP variant additionally matching any
+differently-formatted-but-same-digits span `find_nip_candidates` finds, not
+just an exact string. Dates and amounts are *not* literally source-matched:
+`docs/DATA_SPEC.md` §3.3's derived-due-date case ("termin płatności: 14 dni
+od daty wystawienia") produces a value that legitimately never appears
+verbatim in the source at all, and a normalised `Decimal` like `1234.56`
+will never literally equal a source rendering like `1 234,56 zł`. Both are
+instead nulled only when the source has no date-/amount-shaped text
+whatsoever (reusing `find_date_candidates`/`find_amount_candidates` from
+Stage 4) — a weaker, cheaper check, but the only one that doesn't reject
+correct extractions.
+
+**Currency validation is an ISO 4217 allowlist plus normalisation of only
+the symbols that are unambiguous everywhere — not a re-derivation of the
+full seller-context precedence chain.** `docs/DATA_SPEC.md` §3.2's 6-level
+precedence (explicit code → unambiguous symbol → ambiguous symbol resolved
+by seller country → seller postal address → seller VAT prefix → null) needs
+document context (seller address, VAT ID) that a pure post-hoc validator
+doesn't have; that reasoning belongs to prompt/extraction design in Stage 7.
+What Stage 6 does, per `PROJECT_NOTES.md` §8's literal wording, is narrower:
+`zł`→PLN, `€`→EUR, `£`→GBP (genuinely unambiguous everywhere) plus the
+ISO 4217 allowlist itself. **A bare `$` is deliberately never auto-mapped to
+USD.** `docs/DATA_SPEC.md` §3.2 classifies `$` as an *ambiguous* symbol
+(USD, CAD, AUD, NZD, HKD, SGD, MXN, ...) resolved only by seller-country
+context Stage 6 doesn't have — its own worked example is `$` + a Toronto
+address → CAD, not USD. The real ground truth confirms this: the corpus's
+`Pump_replacement_estimate.eml` record (tagged
+`currency-dollar-no-signal-null` in `data/MANIFEST.md`) mentions "$500" in
+prose but has no seller address/VAT signal, and its expected `currency` is
+`null`. Guessing USD from a bare `$` would fail that exact, real, committed
+case. Also confirmed by the same record: **an amount without a resolvable
+currency gets nulled too**, not just the currency field —
+`validate_extraction` applies that as a general rule, not a one-off.
+
+**A failed NIP mod-11 checksum is informational only, never a rejection
+reason.** `nip_checksum_valid()` (weights 6,5,7,2,3,4,5,6,7,
+`PROJECT_NOTES.md` §8) exists to be surfaced by a future consumer (e.g.
+Stage 8's report), not to null or reject the value itself — confirmed
+against the real ground truth: `Faktura_FV_2024_09_019.docx` (tagged
+`nip-checksum-fail`) has a real, populated `counterparty_tax_id` in
+`data/expected.jsonl` despite failing the checksum.
+
+**Known, stated limitation: the occurs-in-source check is necessary but not
+sufficient against a fake-JSON-block injection.** `docs/DATA_SPEC.md` §5's
+injection corpus includes documents with a plausible-looking alternate
+JSON block embedded in the text, describing a *different* document (its own
+NIP/name/amount). Those decoy values technically "occur in the normalised
+source text" too — `occurs_in_source` cannot by itself tell genuine business
+content from an embedded decoy, and `tests/test_validation.py`'s
+`test_fake_json_injection_value_still_occurs_known_limitation` asserts this
+honestly rather than papering over it. The actual defence against that
+injection class is structural, not content-based: `extractor.db`'s
+single-row-scoped parameterised write (one document's content can only ever
+affect its own row), which is what `docs/DATA_SPEC.md` §5 actually asks the
+test suite to verify ("no record other than that document's own was created
+or modified") — Stage 6's job is only to catch values that don't appear
+*anywhere* in the source at all.
+
 ## Known limitations
 
 - No OCR: a scanned/image-only PDF is quarantined (`no_text_layer`).
@@ -234,6 +322,22 @@ precision actually matters.
   here (fetching both backends' models unconditionally would slow down
   every setup for whichever backend isn't the active default) but worth
   flagging as unaddressed.
+- `validate_extraction()` is not wired into anything yet — nothing calls
+  it with a real (or `fake`) LLM response, and nothing writes its output
+  into `documents` or maps `needs_repair=True` to an actual repair prompt
+  or `quarantine_reason='llm_invalid_output'`. That orchestration loop —
+  call the model, validate, retry once on `needs_repair`, then null/
+  quarantine — is Stage 7's.
+- The ISO 4217 allowlist is a fixed, hand-maintained set of active
+  alphabetic codes. It is not sourced from a machine-readable registry, so
+  a currency that's added, split, or redenominated after this was written
+  (rare, but it happens — see PLN's own 1995 redenomination) would need a
+  manual update.
+- `occurs_in_source`'s date/amount corroboration is weak by design (see
+  above): it confirms the source contains *some* date-/amount-shaped text,
+  not that the model's specific value matches anything found there. A
+  wholesale-fabricated-but-plausible amount on a document that legitimately
+  discusses a different amount would not be caught by this check alone.
 
 ## Throughput bottleneck (requirement 5)
 
