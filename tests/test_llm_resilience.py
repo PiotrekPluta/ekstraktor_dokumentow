@@ -5,9 +5,11 @@ verified by its arguments, not by actually waiting.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
-from extractor.llm.client import LLMBackendUnavailable, LLMRequest, LLMTimeout
+from extractor.llm.client import LLMBackendUnavailable, LLMError, LLMRequest, LLMTimeout
 from extractor.llm.fake import FakeLLMClient
 from extractor.llm.resilience import CircuitBreaker, ResilientLLMClient
 
@@ -129,3 +131,44 @@ def test_open_circuit_breaker_rejects_calls_without_touching_inner_client() -> N
     with pytest.raises(LLMBackendUnavailable):
         client.complete(REQUEST)
     assert len(fake.calls) == 1
+
+
+# --- Stage 7: concurrent complete() from several worker threads ------------
+
+
+def test_concurrent_complete_calls_trip_breaker_exactly_once_no_race() -> None:
+    """--workers 16 against a down backend (docs/plan/Stage_7_plan.md
+    decision 5): every thread calls complete() on the same
+    ResilientLLMClient/CircuitBreaker concurrently. Without the lock added
+    to CircuitBreaker, concurrent record_failure() read-modify-write calls
+    can race and lose an increment — this asserts that doesn't happen: the
+    breaker opens (some threads may still raise LLMTimeout if they read
+    "not yet open" before another thread's failure tips it over, but none
+    may raise anything other than an LLMError, and it must end up open).
+    """
+    fake = FakeLLMClient(always_fail=True)
+    client = ResilientLLMClient(
+        fake, max_retries=0, failure_threshold=5, sleep=lambda _: None
+    )
+
+    errors: list[Exception] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        try:
+            client.complete(REQUEST)
+        except LLMError as exc:
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(errors) == 20  # every call failed one way or another
+    assert client.circuit_breaker_open
+    # The breaker must have opened from consecutive failures actually being
+    # counted, not by chance — with a race dropping increments, threshold=5
+    # could be reached late or never despite 20 failing calls.

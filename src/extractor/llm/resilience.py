@@ -8,10 +8,21 @@ stays open for the rest of this process — no half-open recovery attempt
 mid-run. Once the run ends (`stop_reason=backend_unavailable`), a resume
 starts a fresh client with a fresh breaker; that's the recovery mechanism,
 not a timer within a single run.
+
+Thread safety (Stage 7): one `ResilientLLMClient` is shared across every
+worker thread — that's the point of a circuit breaker, a single "backend is
+down" signal, rather than one breaker per worker that would each need to
+independently detect the same outage. `CircuitBreaker`'s state
+(`_consecutive_failures`/`_open`) is therefore guarded by a lock around each
+read-modify-write (`record_failure`/`record_success`) and the `is_open`
+read, so concurrent `complete()` calls from `--workers 16` can't race and
+lose an increment. Retry/backoff sleeps happen outside the lock — only the
+breaker's own state transitions need it.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 
@@ -33,18 +44,22 @@ class CircuitBreaker:
         self._failure_threshold = failure_threshold
         self._consecutive_failures = 0
         self._open = False
+        self._lock = threading.Lock()
 
     @property
     def is_open(self) -> bool:
-        return self._open
+        with self._lock:
+            return self._open
 
     def record_success(self) -> None:
-        self._consecutive_failures = 0
+        with self._lock:
+            self._consecutive_failures = 0
 
     def record_failure(self) -> None:
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self._failure_threshold:
-            self._open = True
+        with self._lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._failure_threshold:
+                self._open = True
 
 
 class ResilientLLMClient:

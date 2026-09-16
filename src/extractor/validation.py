@@ -237,6 +237,10 @@ class ValidationOutcome:
     nulled_fields: list[str] = field(default_factory=list)
     needs_repair: bool = False
     quarantine_reason: str | None = None
+    # Set only alongside needs_repair=True: human-readable reason the raw
+    # response was rejected, for Stage 7's build_repair_prompt() to quote
+    # back to the model ("your previous response was invalid: <error>").
+    error: str | None = None
 
 
 def normalize_nip(raw: str) -> str:
@@ -368,8 +372,8 @@ def validate_extraction(raw_json: str, source_text: str) -> ValidationOutcome:
     """
     try:
         parsed = _parse(raw_json)
-    except ExtractionUnparseable:
-        return ValidationOutcome(fields=None, needs_repair=True)
+    except ExtractionUnparseable as exc:
+        return ValidationOutcome(fields=None, needs_repair=True, error=str(exc))
 
     nulled: list[str] = []
     data = parsed.model_dump()
@@ -417,7 +421,9 @@ def validate_extraction(raw_json: str, source_text: str) -> ValidationOutcome:
         nulled.append("gross_amount")
 
     if not data["summary"].strip():
-        return ValidationOutcome(fields=None, needs_repair=True)
+        return ValidationOutcome(
+            fields=None, needs_repair=True, error="summary is empty"
+        )
 
     fields = ExtractedFields.model_validate(data)
     return ValidationOutcome(fields=fields, nulled_fields=nulled)
