@@ -2,16 +2,17 @@
 
 Status: Stages 0–6 built (skeleton, SQLite schema, inventory + dedup,
 hardened extraction, context windowing, LLM client + `fake`/`llama_server`/
-`ollama` backends, extraction schema + validation/normalisation), plus
-**Stage 7 (orchestration, resume, budget)**: `extractor run` is now the
-real command — claim pending documents in deterministic order, build a
-windowed+prompted request, call the model, validate, repair-once-then-
-quarantine, write the result, all resumable after `SIGKILL` and bounded by
-`--limit`/`--budget`. Verified for real against the pinned `llama-server` +
-Bielik model, not just the `fake` backend (see "Stage 7 real-fixture
-verification" below) — this is also where a real, load-bearing bug was
-found and fixed: see the context-budget decision below. Report/`eval`
-(Stage 8) aren't built yet.
+`ollama` backends, extraction schema + validation/normalisation), **Stage 7
+(orchestration, resume, budget)**: `extractor run` is now the real command —
+claim pending documents in deterministic order, build a windowed+prompted
+request, call the model, validate, repair-once-then-quarantine, write the
+result, all resumable after `SIGKILL` and bounded by `--limit`/`--budget`.
+Verified for real against the pinned `llama-server` + Bielik model, not
+just the `fake` backend (see "Stage 7 real-fixture verification" below) —
+this is also where a real, load-bearing bug was found and fixed: see the
+context-budget decision below. Plus **Stage 8 (`report`/`eval`)**: both
+commands are real, computed purely from `SELECT`s over the db (see "Report
+and eval" below) — no third command remains a stub.
 
 ## Key decisions
 
@@ -259,11 +260,19 @@ currency gets nulled too**, not just the currency field —
 
 **A failed NIP mod-11 checksum is informational only, never a rejection
 reason.** `nip_checksum_valid()` (weights 6,5,7,2,3,4,5,6,7,
-`PROJECT_NOTES.md` §8) exists to be surfaced by a future consumer (e.g.
-Stage 8's report), not to null or reject the value itself — confirmed
-against the real ground truth: `Faktura_FV_2024_09_019.docx` (tagged
-`nip-checksum-fail`) has a real, populated `counterparty_tax_id` in
-`data/expected.jsonl` despite failing the checksum.
+`PROJECT_NOTES.md` §8) exists to be surfaced by a future consumer, not to
+null or reject the value itself — confirmed against the real ground truth:
+`Faktura_FV_2024_09_019.docx` (tagged `nip-checksum-fail`) has a real,
+populated `counterparty_tax_id` in `data/expected.jsonl` despite failing
+the checksum. Stage 8 decided **not** to surface it as a `report`
+diagnostic after all: `nip_checksum_valid()` is Polish-NIP-shaped (exactly
+10 digits) and returns `False` for anything else, so a naive "how many
+`done` documents fail the checksum" count would mostly just count foreign
+counterparties' VAT IDs — the corpus has plenty (`docs/DATA_SPEC.md`'s
+non-Polish counterparties) — as false "failures", which would be worse
+than not reporting it at all. Doing this correctly needs classifying
+tax-id shape/country first; still unwired, listed under "Known
+limitations".
 
 **Known, stated limitation: the occurs-in-source check is necessary but not
 sufficient against a fake-JSON-block injection.** `docs/DATA_SPEC.md` §5's
@@ -466,6 +475,98 @@ resuming any previous run found there" — as two steps in one command:
 `orchestrate.run`, both against the same db, via `extractor.db.connect` and
 `extractor.llm.build_client`.
 
+### Report and eval (Stage 8)
+
+**`report` is pure `SELECT`s over `documents`/`files`/`runs`/`token_ledger`,
+never in-memory counters accumulated during `run`.** That is the entire
+mechanism behind "the report balances" (requirement 7): `duplicate_files`
+is *defined* as `input_files - unique_documents` rather than measured
+independently, and `unique_documents = processed_ok + quarantined +
+not_started` holds because `documents.status` is a `CHECK`-constrained enum
+covering exactly those buckets — there is no code path where the four
+numbers could disagree, including reading a db `SIGKILL` interrupted
+mid-run.
+
+**`in_progress` counts as `not_started`, not as a fourth bucket**, matching
+`orchestrate._reset_in_progress`'s own treatment of it as "can't tell
+whether the model call happened, so not done" on the next resume. A
+`report` read concurrently with a live `run` sees a claimed-but-unresolved
+row as not-yet-started, consistently with what a resume would do to it.
+
+**Per-run pricing is resolved once, at `run` time, and frozen onto the
+`runs` row** (`price_input_per_million`/`price_output_per_million`, new
+columns), rather than `report` re-reading `[pricing.<backend>]` from a
+config file. `docs/ZADANIE.md` §3 gives `report` only `--db [--json]` — no
+`--config` — so `estimated_cost` has to be reconstructible from the db
+alone; freezing the rate per run also means a db that spans runs against
+different backends (e.g. resumed after switching `config/default.toml`)
+still costs each token at the rate that was actually active when it was
+spent, not at whatever the db happens to be pointed at now.
+
+**`stop_reason`/`backend`/`model` describe the most recent `runs` row.** If
+that row has no `ended_at`, the process never reached `orchestrate.
+_finish_run` — almost always a `SIGKILL` — and `report` synthesises
+`stop_reason = "interrupted"` even though the column itself is `NULL`
+(`runs.stop_reason`'s own `CHECK` already allows this literal;
+`orchestrate.py` just never gets the chance to write it — the run that
+would need it is the one that got killed). `wall_time_s` for that same row
+falls back to the latest `token_ledger` timestamp for it (`completed_at`,
+else `reserved_at`) minus `started_at` — a lower bound, since the true
+kill time is unrecoverable, not an exact figure. A run killed before
+reserving a single token contributes 0.
+
+**`tokens_in`/`tokens_out` sum only `token_ledger` rows with `completed_at`
+set.** A committed reservation for a call that never got a response is
+real budget consumption (must never be re-spent) but not real usage, and
+requirement 7 asks for usage, not reservations.
+
+**`eval` normalises independently of `extractor.normalize`/`validation`.**
+The db's own field values already passed through those once, before ever
+being written — reusing them again in `eval` would mean a bug in a shared
+normaliser cancels itself out of the score instead of showing up as a
+mismatch (the same reasoning `docs/DATA_SPEC.md`'s R0.2 applies to keeping
+the generator independent of the extractor). `eval.py`'s normalisers are
+small and re-derived from `docs/DATA_SPEC.md` §8's `expected.jsonl` format
+rules directly.
+
+**A document not found, still pending, or quarantined counts as wrong for
+every non-null expected field — never excluded from the denominator.** The
+alternative (score only documents the tool actually finished) would let a
+tool improve its accuracy number by quarantining more, which is backwards:
+`docs/ZADANIE.md` requirement 7 already says quarantine is not a failure of
+the *tool*, but it is absolutely still a failure to *extract that field*,
+and `eval` measures extraction. `not_found_in_db` is reported separately
+and means something narrower: the expected document's paths don't resolve
+to any `files` row at all — normally zero for a full run over the archive
+`expected.jsonl` describes (`inventory.build_inventory` registers a row for
+every discovered path regardless of outcome); nonzero means `eval` is being
+pointed at a different or partial archive. Confirmed against the real
+corpus: `not_found_in_db == 2`, exactly the two git-ignored `huge_log_*`
+fixtures absent from this checkout (`scripts/make_huge_file.py` not run) —
+see "Stage 8 real-fixture verification" below.
+
+**`dedup_mismatches`**: an expected document whose `files` resolve to more
+than one distinct `documents.id` — this tool's dedup disagreeing with the
+ground truth's grouping. Counted and reported, not silently dropped, but
+the record is still scored (against the smaller of the disagreeing ids,
+picked only for determinism) rather than excluded, so a dedup bug doesn't
+also erase the record from every field's denominator.
+
+**`summary` is scored by a separate, documented loose metric, never folded
+into the seven-field accuracy** — `docs/DATA_SPEC.md` §8 is explicit that
+exact match is meaningless here and that this must be its own column. The
+metric checks, per non-quarantined expected document: the produced text is
+non-empty and shaped like one sentence (no internal `.`/`!`/`?` before an
+optional single trailing one — a cheap proxy, not a real sentence-boundary
+detector); the counterparty name's longest non-generic word appears in it
+case-insensitively (`_GENERIC_NAME_WORDS`, a short hand-picked Polish/
+English legal-form stoplist, not NER); and, for `invoice`/`contract`/
+`offer`, a doc-type keyword appears. **No language-match check is
+attempted at all** — a real language check would need a language-detection
+dependency for one sub-component of a metric that is already explicitly
+advisory; left out and stated here rather than faked with an unreliable
+heuristic.
+
 ### Stage 7 real-fixture verification
 
 Run against the actual pinned model (Bielik-4.5B-v3.0-Instruct.Q8_0, via a
@@ -492,6 +593,26 @@ per-request client timeout (Stage 5's `LlamaServerClient`/`OllamaClient`
 default, already flagged as unvalidated below) is too tight for *this*
 specific slow environment; not changed here since raising it without a
 measurement on real M1 hardware would just be a different unvalidated guess.
+
+### Stage 8 real-fixture verification
+
+Run against the real `data/corpus` (not a synthetic one-file fixture) with
+the `fake` backend — a real run's `report` output balances
+(`input_files=46 = duplicate_files=10 + unique_documents=36`;
+`unique_documents=36 = processed_ok=0 + quarantined=36 + not_started=0`,
+every document forced to quarantine since the fake backend's default
+response is `{}`, invalid against the schema) — and `eval` against the real
+`data/expected.jsonl` produced exactly `not_found_in_db=2` (the two
+git-ignored `huge_log_*` files, absent because `scripts/make_huge_file.py`
+wasn't run in this checkout — confirmed independently via `data/MANIFEST.md`,
+not assumed) and `dedup_mismatches=0`. Per-field accuracy numbers were
+non-zero and *consistent with* every real document scoring wrong (forced
+quarantine) while corrupt/other documents whose expected value is
+legitimately `null` for a given field (not just `doc_type`, e.g.
+correspondence with no `due_date`) still matched on that field — the
+expected shape for a run that never actually extracted anything, not a
+sign of a scoring bug. `summary`'s loose score was `0.0%`, correctly, since
+the fake backend never produces a non-empty summary.
 
 ## Known limitations
 
@@ -576,6 +697,29 @@ measurement on real M1 hardware would just be a different unvalidated guess.
   tripped the breaker gets individually quarantined instead of counted as
   part of the same outage) is stated above as a deliberate non-fix, not
   resolved.
+- `report`'s `wall_time_s` for an interrupted run (no `ended_at`) is a
+  lower-bound approximation (latest `token_ledger` timestamp minus
+  `started_at`), not the true kill time, which is unrecoverable once the
+  process is gone. Every other run row's contribution is exact.
+- `eval`'s `summary` loose metric has no language-match check (would need a
+  language-detection dependency for one sub-component of a metric that is
+  already advisory, not the headline score) and its keyword logic is a
+  short hand-picked stoplist plus longest-remaining-word heuristic, not
+  NER — a counterparty name that is entirely generic words falls back to
+  its single longest word regardless of whether that word would actually
+  appear in a good summary.
+- `nip_checksum_valid()` (Stage 6) is still unwired into anything —
+  `report` deliberately does not surface a "checksum failures" count (see
+  "Report and eval" above: it would mostly flag foreign counterparties'
+  non-Polish tax IDs as false failures, since the check only recognises
+  10-digit Polish NIP shape).
+- `eval`'s per-field accuracy denominator is every document in
+  `expected.jsonl`, always — a document `run` never reached (still
+  `pending` under `--limit`/`--budget`) scores as wrong on every non-null
+  field rather than being excluded, which is a deliberate choice (see
+  "Report and eval" above) but does mean the accuracy number conflates "the
+  model got it wrong" with "the model never saw it"; `report`'s own
+  `not_started` count is the way to tell the two apart for a given db.
 
 ## Throughput bottleneck (requirement 5)
 

@@ -175,8 +175,17 @@ def _run(
 
     backend_name = config.backend
     model_name = _resolve_model_tag(config)
+    price_in, price_out = _resolve_prices(config, backend_name)
     run_id = _insert_run(
-        conn, now, config, backend_name, model_name, config_path, str(input_path)
+        conn,
+        now,
+        config,
+        backend_name,
+        model_name,
+        config_path,
+        str(input_path),
+        price_in,
+        price_out,
     )
 
     already_attempted = _count_attempted(conn)
@@ -608,12 +617,15 @@ def _insert_run(
     model_name: str,
     config_path: str,
     input_path: str,
+    price_input_per_million: float,
+    price_output_per_million: float,
 ) -> int:
     conn.execute("BEGIN IMMEDIATE")
     cur = conn.execute(
         "INSERT INTO runs "
         "(started_at, workers, limit_docs, budget_tokens, backend, model, "
-        "config_path, input_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "config_path, input_path, price_input_per_million, "
+        "price_output_per_million) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             now,
             config.workers,
@@ -623,6 +635,8 @@ def _insert_run(
             model_name,
             config_path,
             input_path,
+            price_input_per_million,
+            price_output_per_million,
         ),
     )
     conn.execute("COMMIT")
@@ -651,6 +665,19 @@ def _sum_reserved_tokens(conn: sqlite3.Connection) -> int:
         "SELECT COALESCE(SUM(reserved_tokens), 0) FROM token_ledger"
     ).fetchone()
     return total
+
+
+def _resolve_prices(config: Config, backend_name: str) -> tuple[float, float]:
+    """`[pricing.<backend>]` from config, defaulting to 0.0 (docs/ZADANIE.md
+    requirement 6: local backends cost zero, same mechanism as a paid one).
+    Missing entirely (e.g. hand-built `Config.raw = {}` in tests) is treated
+    the same as an explicit zero rate, not an error.
+    """
+    prices = config.raw.get("pricing", {}).get(backend_name, {})
+    return (
+        float(prices.get("input_per_million", 0.0)),
+        float(prices.get("output_per_million", 0.0)),
+    )
 
 
 def _resolve_model_tag(config: Config) -> str:
