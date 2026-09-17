@@ -43,7 +43,9 @@ def build_client(config: Config) -> LLMClient:
     interface" docs/PROJECT_NOTES.md §8 Stage 5 describes.
     """
     if config.backend == "fake":
-        return ResilientLLMClient(FakeLLMClient())
+        fake_cfg = config.raw.get("backend", {}).get("fake", {})
+        delay = fake_cfg.get("delay_s", 0.0)
+        return ResilientLLMClient(FakeLLMClient(delay=delay))
     if config.backend == "llama_server":
         llama_cfg = config.raw["backend"]["llama_server"]
         inner = LlamaServerClient(llama_cfg["host"], llama_cfg["port"])
