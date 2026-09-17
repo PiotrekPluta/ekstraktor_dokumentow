@@ -3,6 +3,12 @@
 completed documents, cumulative `--limit`/`--budget`, worker-count
 independence, the repair-attempt path, circuit-breaker stop behaviour, and
 integrity (a document's content can only ever affect its own row).
+`test_workers_1_and_workers_16_produce_identical_final_documents` is a
+Stage 9 addition — requirement 5's stability bar is literally "N=1 i
+N=16", which the original Stage 7 test (1 vs 4) didn't hit. The real,
+process-level `SIGKILL` acceptance test lives separately in
+`test_resume_subprocess.py`; the resumability tests here exercise the
+in-process orchestration *logic* only.
 
 Documents are seeded directly into `documents` rows (bypassing
 `inventory.build_inventory`) so each test controls exactly which rows are
@@ -261,54 +267,55 @@ def test_budget_stops_before_the_model_call_document_stays_pending(
 # --- worker count doesn't change the result set -----------------------------
 
 
+_DOCUMENT_COLUMNS = (
+    "id, status, quarantine_reason, doc_type, counterparty_name, "
+    "counterparty_tax_id, issue_date, due_date, gross_amount, currency, summary"
+)
+
+
+def _run_with_workers(tmp_path: Path, db_name: str, n_docs: int, workers: int) -> list:
+    db_path = tmp_path / db_name
+    conn = connect(db_path)
+    for i in range(n_docs):
+        _seed_document(conn, f"doc{i}")
+    conn.close()
+
+    response = LLMResponse(text=VALID_RESPONSE_TEXT, tokens_in=10, tokens_out=10)
+    client = ResilientLLMClient(FakeLLMClient(response=response), sleep=lambda _: None)
+    orchestrate_run(
+        db_path,
+        tmp_path / "input",
+        client,
+        _config(workers=workers),
+        config_path="c",
+        count_tokens=_fixed_counter(20),
+    )
+
+    conn = connect(db_path)
+    rows = conn.execute(
+        f"SELECT {_DOCUMENT_COLUMNS} FROM documents ORDER BY id"
+    ).fetchall()
+    return [tuple(r) for r in rows]
+
+
 def test_workers_1_and_workers_4_produce_identical_final_documents(
     tmp_path: Path,
 ) -> None:
-    def build_db(path: Path) -> None:
-        conn = connect(path)
-        for i in range(8):
-            _seed_document(conn, f"doc{i}")
-        conn.close()
+    rows_a = _run_with_workers(tmp_path, "a.sqlite", n_docs=8, workers=1)
+    rows_b = _run_with_workers(tmp_path, "b.sqlite", n_docs=8, workers=4)
+    assert rows_a == rows_b
 
-    db_a = tmp_path / "a.sqlite"
-    db_b = tmp_path / "b.sqlite"
-    build_db(db_a)
-    build_db(db_b)
 
-    response = LLMResponse(text=VALID_RESPONSE_TEXT, tokens_in=10, tokens_out=10)
-    client_a = ResilientLLMClient(
-        FakeLLMClient(response=response), sleep=lambda _: None
-    )
-    client_b = ResilientLLMClient(
-        FakeLLMClient(response=response), sleep=lambda _: None
-    )
-
-    orchestrate_run(
-        db_a,
-        tmp_path / "input",
-        client_a,
-        _config(workers=1),
-        config_path="c",
-        count_tokens=_fixed_counter(20),
-    )
-    orchestrate_run(
-        db_b,
-        tmp_path / "input",
-        client_b,
-        _config(workers=4),
-        config_path="c",
-        count_tokens=_fixed_counter(20),
-    )
-
-    conn_a = connect(db_a)
-    conn_b = connect(db_b)
-    cols = (
-        "id, status, quarantine_reason, doc_type, counterparty_name, "
-        "counterparty_tax_id, issue_date, due_date, gross_amount, currency, summary"
-    )
-    rows_a = conn_a.execute(f"SELECT {cols} FROM documents ORDER BY id").fetchall()
-    rows_b = conn_b.execute(f"SELECT {cols} FROM documents ORDER BY id").fetchall()
-    assert [tuple(r) for r in rows_a] == [tuple(r) for r in rows_b]
+def test_workers_1_and_workers_16_produce_identical_final_documents(
+    tmp_path: Path,
+) -> None:
+    """docs/ZADANIE.md requirement 5's literal stability bar ("N = 1 i N =
+    16 na maszynie oceniającej"), with enough documents (20) that 16
+    workers are actually all put to work rather than mostly sitting idle.
+    """
+    rows_a = _run_with_workers(tmp_path, "a.sqlite", n_docs=20, workers=1)
+    rows_b = _run_with_workers(tmp_path, "b.sqlite", n_docs=20, workers=16)
+    assert rows_a == rows_b
 
 
 # --- repair-attempt path -----------------------------------------------------

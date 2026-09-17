@@ -9,6 +9,7 @@ extractor.llm.resilience's retry/circuit-breaker paths end to end.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 
 from extractor.llm.client import LLMError, LLMRequest, LLMResponse, LLMTimeout
@@ -27,6 +28,7 @@ class FakeLLMClient:
         error_factory: Callable[[], LLMError] = lambda: LLMTimeout(
             "fake backend: simulated timeout"
         ),
+        delay: float = 0.0,
     ) -> None:
         """`responses`, when given, overrides `response`: successive calls
         return `responses[0]`, `responses[1]`, ... then repeat the last
@@ -35,16 +37,28 @@ class FakeLLMClient:
         double. `self.calls` is appended under a lock since Stage 7 shares
         one `FakeLLMClient` across worker threads (via `ResilientLLMClient`)
         the same way a real backend client would be.
+
+        `delay` (Stage 9): sleeps this many seconds before returning, for
+        tests that need a real, spawned `extractor run` subprocess to stay
+        alive long enough to reliably `SIGKILL` mid-run — with no delay,
+        the fake backend has no real I/O at all and a handful of documents
+        can finish before an external poll loop even observes one
+        completion. Zero by default (every other test wants the fake
+        backend to be instant); only `[backend.fake] delay_s` in a config
+        file (`extractor.llm.build_client`) sets it to something else.
         """
         self._response = response if response is not None else _DEFAULT_RESPONSE
         self._responses = responses
         self._fail_first_n = fail_first_n
         self._always_fail = always_fail
         self._error_factory = error_factory
+        self._delay = delay
         self.calls: list[LLMRequest] = []
         self._lock = threading.Lock()
 
     def complete(self, request: LLMRequest) -> LLMResponse:
+        if self._delay:
+            time.sleep(self._delay)
         with self._lock:
             self.calls.append(request)
             call_index = len(self.calls) - 1

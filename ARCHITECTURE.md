@@ -12,7 +12,12 @@ just the `fake` backend (see "Stage 7 real-fixture verification" below) —
 this is also where a real, load-bearing bug was found and fixed: see the
 context-budget decision below. Plus **Stage 8 (`report`/`eval`)**: both
 commands are real, computed purely from `SELECT`s over the db (see "Report
-and eval" below) — no third command remains a stub.
+and eval" below) — no third command remains a stub. Plus **Stage 9 (test
+suite)**: requirement 10's acceptance list (resume-after-`SIGKILL`, budget
+stop, report balance, an unprocessable document, injection, `--workers 1`
+vs `16`, memory on a huge file) is now covered end to end, including a
+real `SIGKILL` against a real spawned process, not just in-process
+simulation (see "Test suite" below).
 
 ## Key decisions
 
@@ -614,6 +619,69 @@ expected shape for a run that never actually extracted anything, not a
 sign of a scoring bug. `summary`'s loose score was `0.0%`, correctly, since
 the fake backend never produces a non-empty summary.
 
+### Test suite (Stage 9)
+
+docs/ZADANIE.md requirement 10's list ("at least: resume after
+interruption, budget stop, report balance, an unprocessable document")
+plus docs/PROJECT_NOTES.md §8 Stage 9's fuller version (adds injection,
+`--workers 1` vs `16`, memory on a huge file) — all against the `fake`
+backend, never a real model/network/API key. Most items already had
+coverage from the stage that introduced the behaviour (budget stop and
+report-balance in `test_orchestrate.py`/`test_report.py`, unprocessable
+documents across `test_inventory.py`'s corrupt fixtures and
+`test_orchestrate.py`'s repair-exhausted case, injection in
+`test_orchestrate.py`). Stage 9 adds the pieces that genuinely needed new
+machinery:
+
+**A real `SIGKILL` against a real, spawned `extractor run` process**
+(`tests/test_resume_subprocess.py`) — every earlier resumability test
+(Stage 7) runs orchestration in-process against a `ThreadPoolExecutor`,
+which proves the *logic* (`in_progress` reset, no double-claim) but never
+crosses a real process boundary or an un-catchable signal. This test does:
+spawns `python -m extractor.cli run ...` as a real subprocess, polls the
+db from *outside* that process until at least one document is durably
+`quarantined`, `SIGKILL`s it, resumes with the identical command against
+the same db, then asserts two separate things — the final record set
+matches a fresh clean run over the same input (requirement 4's literal
+wording), **and** the documents that were already terminal before the
+kill gained zero additional `token_ledger` rows after resume. The second
+check is load-bearing on its own: with a fully deterministic `fake`
+backend, comparing only final field values could never catch a bug that
+silently reprocessed an already-completed document, since reprocessing a
+deterministic backend reproduces the identical answer. Needed a new,
+test-only `[backend.fake] delay_s` config knob (`FakeLLMClient(delay=...)`,
+wired through `extractor.llm.build_client`) — with no artificial latency
+the fake backend has no real I/O at all, and a handful of documents can
+finish before an external poll loop (running in a different process)
+observes even the first completion, making "kill strictly mid-run" wholly
+unreliable to hit.
+
+**`--workers 16`, not just `4`** (`test_workers_1_and_workers_16_produce_
+identical_final_documents`) — Stage 7's own worker-independence test used
+4 workers over 8 documents; requirement 5 states the bar as literally "N=1
+i N=16", so Stage 9 adds a 16-workers/20-documents variant (enough
+documents that 16 threads are actually all doing something, not mostly
+idle) rather than treating the smaller case as sufficient evidence.
+
+**Memory on a huge file** (`tests/test_memory.py`) — generates a fresh
+300MB synthetic `.txt` into `tmp_path` (deliberately *not* depending on
+`data/corpus`'s real, git-ignored `huge_log_*` fixture, since regenerating
+it via `scripts/make_huge_file.py` also appends rows to the committed
+`data/expected.jsonl` as a side effect — a test must never trigger that
+implicitly) and asserts `resource.getrusage` RSS growth, for both this
+process (`RUSAGE_SELF`, covers `inventory.py`'s streamed hashing) and its
+extraction subprocess (`RUSAGE_CHILDREN`, covers `textextract.py`'s
+`MAX_TEXT_CHARS`-capped read), stays far below the file's own size — a
+generous 150MB canary threshold, empirically ~65MB in practice. This is
+**not** the requirement-9 2GB acceptance check itself: that number is a
+property of the real M1 machine and macOS's `ru_maxrss` is in *bytes*
+where Linux's is in *KB* (already flagged above), so it's checked for real
+at Stage 10 via `/usr/bin/time -l`, not asserted portably in CI. What this
+test guards is the structural property that makes the 2GB bound plausible
+at all — the file is genuinely streamed/capped, never loaded whole — and
+it would clearly fail (blow past the canary by 2×+) if that regressed to
+`Path.read_bytes()` on the whole file.
+
 ## Known limitations
 
 - No OCR: a scanned/image-only PDF is quarantined (`no_text_layer`).
@@ -713,6 +781,19 @@ the fake backend never produces a non-empty summary.
   "Report and eval" above: it would mostly flag foreign counterparties'
   non-Polish tax IDs as false failures, since the check only recognises
   10-digit Polish NIP shape).
+- `tests/test_resume_subprocess.py`'s real-`SIGKILL` test is inherently
+  timing-based (poll-from-outside-the-process, `delay_s`-paced): reliable
+  and repeatable on this dev machine (run several times back to back with
+  no failures) but, like any test that waits on wall-clock behaviour of a
+  spawned process, a much slower or heavily loaded CI runner could in
+  principle race the poll loop against the process finishing all
+  documents before the first observed completion — guarded against by an
+  explicit assertion (`len(pre_kill_ids) < n_docs`) that fails loudly
+  rather than silently passing a degenerate run, but not eliminated.
+- `tests/test_memory.py`'s RSS-growth threshold (150MB canary for a 300MB
+  file) is a heuristic regression guard, not the requirement-9 acceptance
+  measurement itself — see "Test suite" above for why that has to happen
+  on the real M1 machine instead.
 - `eval`'s per-field accuracy denominator is every document in
   `expected.jsonl`, always — a document `run` never reached (still
   `pending` under `--limit`/`--budget`) scores as wrong on every non-null
