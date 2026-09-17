@@ -227,3 +227,36 @@ def test_summary_loose_metric_checks_shape_and_keywords(tmp_path: Path) -> None:
     assert good.summary_loose_score == 1.0
     assert two_sentences.summary_loose_score == 0.0
     assert missing_keyword.summary_loose_score == 0.0
+
+
+def test_summary_shape_check_tolerates_polish_legal_form_abbreviations(
+    tmp_path: Path,
+) -> None:
+    """Regression: found against a real model run over data/corpus —
+    "Sp. z o.o." (ubiquitous in this corpus's Polish company names) has
+    internal periods that a naive "any [.!?] means more than one sentence"
+    check misread as a second sentence, wrongly failing summaries that
+    correctly spelled out the counterparty's full legal name.
+    """
+    conn = connect(tmp_path / "db.sqlite")
+    _seed(
+        conn,
+        "doc1",
+        "umowa.html",
+        doc_type="contract",
+        counterparty_name="Żółtowski i Wspólnicy Sp. z o.o.",
+        summary=(
+            "Umowa remontowa między Spółdzielnią a Żółtowskim i Wspólnikami "
+            "Sp. z o.o. na roboty budowlane."
+        ),
+    )
+    expected = dict(
+        _EXPECTED_INVOICE,
+        doc_type="contract",
+        counterparty_name="Żółtowski i Wspólnicy Sp. z o.o.",
+        files=["umowa.html"],
+    )
+
+    result = evaluate(conn, [expected])
+
+    assert result.summary_loose_score == 1.0

@@ -254,7 +254,13 @@ _NORMALIZERS = {
     "currency": _norm_currency,
 }
 
-_SENTENCE_END_RE = re.compile(r"[.!?]")
+# A sentence-ending mark only counts if followed by whitespace and a
+# capital letter (a new sentence starting) — found necessary against real
+# model output: Polish legal-form abbreviations ("Sp. z o.o.", ubiquitous
+# in this corpus) have internal periods that are not sentence boundaries,
+# and a bare r"[.!?]" flagged every summary that spelled out a
+# counterparty's full legal name as "more than one sentence".
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s+[A-ZĄĆĘŁŃÓŚŹŻ])")
 _WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 
 

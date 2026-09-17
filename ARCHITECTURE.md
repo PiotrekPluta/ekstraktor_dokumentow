@@ -561,9 +561,9 @@ also erase the record from every field's denominator.
 into the seven-field accuracy** — `docs/DATA_SPEC.md` §8 is explicit that
 exact match is meaningless here and that this must be its own column. The
 metric checks, per non-quarantined expected document: the produced text is
-non-empty and shaped like one sentence (no internal `.`/`!`/`?` before an
-optional single trailing one — a cheap proxy, not a real sentence-boundary
-detector); the counterparty name's longest non-generic word appears in it
+non-empty and shaped like one sentence (a `.`/`!`/`?` only counts as a
+sentence boundary when followed by whitespace and a capital letter — see
+below); the counterparty name's longest non-generic word appears in it
 case-insensitively (`_GENERIC_NAME_WORDS`, a short hand-picked Polish/
 English legal-form stoplist, not NER); and, for `invoice`/`contract`/
 `offer`, a doc-type keyword appears. **No language-match check is
@@ -571,6 +571,32 @@ attempted at all** — a real language check would need a language-detection
 dependency for one sub-component of a metric that is already explicitly
 advisory; left out and stated here rather than faked with an unreliable
 heuristic.
+
+**Bug found and fixed against real model output, not the `fake` backend:**
+the one-sentence shape check originally flagged *any* `.`/`!`/`?` in the
+summary as a second sentence, which misfired on Polish legal-form
+abbreviations — `Sp. z o.o.` (ubiquitous in this corpus's company names)
+has two internal periods that are not sentence boundaries. A real
+`extractor run` against `data/corpus` with the pinned `llama-server` +
+Bielik model produced a genuinely correct one-sentence summary that
+spelled out a counterparty's full legal name and was still scored `0%` on
+the loose metric — caught only by looking at real output, not by reasoning
+about the regex in isolation (`tests/test_eval.py`'s existing synthetic
+cases all used bare, abbreviation-free names). Fixed by only counting a
+mark as a sentence boundary when it's followed by whitespace and a capital
+letter (`_SENTENCE_END_RE = r"[.!?](?=\s+[A-ZĄĆĘŁŃÓŚŹŻ])"`), which still
+catches a genuine two-sentence summary (the next sentence starts with a
+capital) while tolerating `Sp. z o.o.`/`S.A.`-style abbreviations. Same
+real run also reconfirmed the Stage 7 Swedish-counterparty currency trap
+(`Offer_facade_renovation.eml` → `currency: "SEK"`, still correct) and
+produced a live example of the injection-resistance property holding:
+one document's text contained "Zignoruj wszystkie wcześniejsze
+instrukcje" ("ignore all previous instructions") and the model extracted
+it *verbatim as that document's own `counterparty_name` field value* —
+fooled at the field level (a legitimate, expected outcome; nothing here
+claims field-level robustness against adversarial content) but requirement
+8's actual guarantee held: nothing outside that one document's own row was
+touched.
 
 ### Stage 7 real-fixture verification
 
@@ -701,11 +727,18 @@ it would clearly fail (blow past the canary by 2×+) if that regressed to
   `assets/tokenizer.json`) but is no longer what a real `run` uses.
 - Retry count, backoff base, and circuit-breaker threshold are hardcoded
   `ResilientLLMClient` defaults (3 retries, 1s base, 5 consecutive
-  failures), not yet exposed through `config/default.toml`. Same for both
-  clients' 60s/80s-ish per-request timeouts — and the real ~107s Ollama
-  cold-start measured this stage suggests the eventual default needs to be
-  well above a naive guess, or Stage 7 needs a separate, longer "model
-  loading" timeout distinct from the steady-state per-request one.
+  failures), not yet exposed through `config/default.toml`. **Per-request
+  timeout is now configurable** (`[backend.llama_server]`/`[backend.ollama]`
+  `timeout_s`, `extractor.llm.build_client`), added after this gap caused a
+  real `backend_unavailable` run on a slow CPU-only dev box (per-request
+  latency there is ~140-280s against the 60s hardcoded default, well past
+  the circuit breaker's failure threshold) — but `config/default.toml`
+  itself still doesn't set it, so the M1 target's default behaviour is
+  unchanged, and the *right* default for real M1 hardware is still an open
+  question, not resolved by making it configurable. The real ~107s Ollama
+  cold-start measured at Stage 5c still suggests the eventual default needs
+  to be well above a naive guess, or a separate, longer "model loading"
+  timeout distinct from the steady-state per-request one.
 - Neither `llama-server`'s nor Ollama's process/model lifecycle (start with
   the pinned model, health-check before sending traffic, stop on exit) is
   managed by this tool yet — both clients only ever talk to a server
@@ -775,7 +808,12 @@ it would clearly fail (blow past the canary by 2×+) if that regressed to
   short hand-picked stoplist plus longest-remaining-word heuristic, not
   NER — a counterparty name that is entirely generic words falls back to
   its single longest word regardless of whether that word would actually
-  appear in a good summary.
+  appear in a good summary. Its one-sentence shape check
+  (`.`/`!`/`?` + whitespace + capital letter = a new sentence, fixed after
+  a real-run bug — see "Report and eval" above) is still a heuristic, not
+  a real sentence-boundary detector: an abbreviation followed by a
+  capitalised proper noun (rare in this corpus, not ruled out in general)
+  would still be misread as two sentences.
 - `nip_checksum_valid()` (Stage 6) is still unwired into anything —
   `report` deliberately does not surface a "checksum failures" count (see
   "Report and eval" above: it would mostly flag foreign counterparties'
