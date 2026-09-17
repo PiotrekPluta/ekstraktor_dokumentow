@@ -41,6 +41,15 @@ def build_client(config: Config) -> LLMClient:
     """Every backend goes through the same resilience wrapper — retry and
     circuit-breaking aren't a `fake`-only concern, they're the "shared
     interface" docs/PROJECT_NOTES.md §8 Stage 5 describes.
+
+    `timeout_s` under `[backend.llama_server]`/`[backend.ollama]` is
+    optional and, when absent, leaves each client's own hardcoded default
+    (60s) untouched — `config/default.toml` doesn't set it, so the M1
+    target's behaviour is unchanged. It exists because that default was
+    flagged (ARCHITECTURE.md, Stage 7) as too tight for a slow, CPU-only
+    dev box (~140-280s/request measured there, vs. a 60s timeout), with no
+    way to override it short of editing client code; this makes it a
+    config concern instead, for whoever needs to raise it locally.
     """
     if config.backend == "fake":
         fake_cfg = config.raw.get("backend", {}).get("fake", {})
@@ -48,12 +57,18 @@ def build_client(config: Config) -> LLMClient:
         return ResilientLLMClient(FakeLLMClient(delay=delay))
     if config.backend == "llama_server":
         llama_cfg = config.raw["backend"]["llama_server"]
-        inner = LlamaServerClient(llama_cfg["host"], llama_cfg["port"])
+        kwargs = {}
+        if "timeout_s" in llama_cfg:
+            kwargs["timeout_s"] = llama_cfg["timeout_s"]
+        inner = LlamaServerClient(llama_cfg["host"], llama_cfg["port"], **kwargs)
         return ResilientLLMClient(inner)
     if config.backend == "ollama":
         ollama_cfg = config.raw["backend"]["ollama"]
+        kwargs = {}
+        if "timeout_s" in ollama_cfg:
+            kwargs["timeout_s"] = ollama_cfg["timeout_s"]
         inner = OllamaClient(
-            ollama_cfg["host"], ollama_cfg["port"], ollama_cfg["model_tag"]
+            ollama_cfg["host"], ollama_cfg["port"], ollama_cfg["model_tag"], **kwargs
         )
         return ResilientLLMClient(inner)
     raise NotImplementedError(f"backend {config.backend!r} is not a known backend")

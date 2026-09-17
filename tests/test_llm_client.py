@@ -63,3 +63,19 @@ def test_build_client_for_ollama_backend() -> None:
 def test_build_client_rejects_unknown_backend() -> None:
     with pytest.raises(NotImplementedError):
         build_client(_config("something_else"))
+
+
+def test_build_client_honours_configured_llama_server_timeout() -> None:
+    raw = {
+        "backend": {
+            "llama_server": {"host": "127.0.0.1", "port": 8080, "timeout_s": 300.0}
+        }
+    }
+    client = build_client(_config("llama_server", raw))
+    assert client._inner._timeout_s == 300.0
+
+
+def test_build_client_llama_server_timeout_defaults_when_unset() -> None:
+    raw = {"backend": {"llama_server": {"host": "127.0.0.1", "port": 8080}}}
+    client = build_client(_config("llama_server", raw))
+    assert client._inner._timeout_s == 60.0
