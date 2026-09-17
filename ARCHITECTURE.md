@@ -508,6 +508,27 @@ also what `config/ci_macos.toml` names, so there is only ever one
 `vendor/versions.lock` to produce or read regardless of which config a
 given step runs with.
 
+**The `pytest-macos-arm64` job's very first real run found a genuine,
+platform-independent bug**: `setup.sh` ran `uv sync --locked` with no
+`--group`/`--all-groups` flag, which only installs the `dev` dependency
+group (uv treats a group literally named `dev` as included by default) —
+not `datagen` (Pillow, `reportlab`), which `tests/test_generator.py`
+imports transitively (via `scripts/generate_data.py` →
+`scripts/generator/corrupt.py`'s `from PIL import Image, ImageDraw`) at
+*collection* time, aborting the entire suite (`Interrupted: 1 error during
+collection`) before a single test ran. This had been latent since Stage 1:
+every local dev `.venv` used while building this project already had
+`datagen` installed from that stage's own work, so `uv run pytest` never
+exercised the bare-`dev`-group path `setup.sh` actually produces on a
+fresh clone — reproduced locally on Linux too once checked (`uv sync
+--locked` alone genuinely uninstalls Pillow/reportlab here), confirming
+it was never OS-specific; the CI job just happened to be the first truly
+fresh `uv sync` this project had run. Fixed by changing `setup.sh` to
+`uv sync --locked --all-groups`, so a fresh reviewer clone installs
+everything both `pytest` and `ruff` need, matching `PROJECT_NOTES.md` §6's
+own stated intent ("do install it in `setup.sh` — requirement 10 has the
+reviewer run the tests") literally rather than only for the `dev` group.
+
 **`FakeLLMClient` gained a `responses: list[LLMResponse]` sequencing mode**
 (returns them in order, then repeats the last) — needed to test the
 repair-attempt path (invalid JSON, then valid) without a second test
