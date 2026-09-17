@@ -429,11 +429,11 @@ floored at 200 tokens. Computed once per `run()` call (it depends only on
 config and the counter, not on any document) and threaded through to every
 worker/document alongside `count_tokens` itself.
 
-**Found via the same real-fixture pass, not yet fixed in code — a
-deployment/server-configuration concern rather than a Stage 7 logic bug**:
-`llama-server`'s `--ctx-size` is the *total* KV-cache budget shared across
-all of its parallel slots when `kv_unified=true` (its default), not a
-per-slot budget. Starting the server with `--ctx-size 2048` and its default
+**Found via the same real-fixture pass, fixed by `extractor.llm.lifecycle`
+(below), not at the time it was first found**: `llama-server`'s
+`--ctx-size` is the *total* KV-cache budget shared across all of its
+parallel slots when `kv_unified=true` (its default), not a per-slot
+budget. Starting the server with `--ctx-size 2048` and its default
 `--parallel` (4) means each of the 4 concurrently-served requests only
 really has ~512 tokens of headroom, not 2048 — confirmed for real: four
 `--workers`-driven concurrent requests, each individually well under 2048
@@ -443,13 +443,48 @@ combined. `config/default.toml`'s `context_tokens` is a single number and
 gets. This only reproduces under real concurrency (`--workers > 1` against
 a real backend with more than one server slot) — every automated test uses
 the `fake` backend, which has no concept of a shared KV cache, so nothing
-in the test suite catches this. The fix belongs wherever the server process
-itself gets started (`--ctx-size` should scale with `--parallel`, or
-`--parallel` should be pinned to `1`), which is already-documented as
-unowned below ("Neither `llama-server`'s nor Ollama's process/model
-lifecycle... is managed by this tool yet") — noted here specifically so
-that whoever writes that startup code knows to size `--ctx-size` as
-`context_tokens * n_slots`, not just `context_tokens`.
+in the test suite catches this on its own.
+
+**`extractor.llm.lifecycle` starts and health-checks `llama-server` itself
+now**, closing the gap the paragraph above left open and the one below
+("Neither `llama-server`'s nor Ollama's process/model lifecycle... is
+managed by this tool yet") used to describe. Two callers, both going
+through the same `ensure_running()`:
+`extractor.cli.run` calls `ensure_backend_ready()` before every run
+(self-healing — a `GET /health` first, and a new process only if that
+doesn't answer 200); `scripts/smoke_test_backend.py`, run at the end of
+`setup.sh`, calls the same function once at install time and, on success,
+leaves the server running — this is what makes `./setup.sh` actually start
+"the whole environment" rather than only fetch files for it, and also
+sends one real, tiny completion through the freshly-started server, since
+`fetch_runtime.py`'s checksum verification can only prove the *bytes* are
+right, not that the GGUF actually loads or that this llama-server release
+can serve it. Found and fixed together, real fixture again: this session's
+manually-started `--ctx-size 8192 --parallel 4` on a CPU-only dev box still
+tripped `stop_reason=backend_unavailable`, traced to `n_threads` and
+`timeout_s`, not `--ctx-size`, showing the previous fix already held — see
+the `timeout_s` limitation entry below.
+
+Because `lifecycle.py` is now the thing starting the process, it always
+sets `--parallel` to the same `n_slots` (`config.workers`) it multiplies
+into `--ctx-size`, so the two can no longer drift apart the way a
+human-started server previously could. `is_healthy()` is checked *before*
+ever starting a process, so a server started by hand (any `--parallel`,
+any extra flags) is left alone and used as-is — deliberately no opt-out
+flag, since the health-check-first behaviour already is one. `-ngl`/`-t`
+are deliberately never guessed from `platform.system()`: `PROJECT_NOTES.md`
+§5 notes GitHub Actions' own `macos-14` runners are arm64 but Metal
+Performance Shaders don't work under Apple's virtualisation there, so
+`Darwin`+`arm64` alone doesn't tell you whether Metal offload is safe to
+enable — a real M1 Mac and that CI runner need opposite answers on the
+same OS/architecture pair. `[backend.llama_server].extra_args` (an
+optional list of raw argv strings, empty by default so `config/
+default.toml`'s M1-target behaviour is unchanged) is the escape hatch for
+whichever flags a given environment actually needs instead of a baked-in
+guess that would be wrong for one of the two; `my_run_testing/
+local_cpu.toml` (untracked, this session's CPU-only dev config) sets
+`extra_args = ["-ngl", "0"]` explicitly rather than relying on this
+binary's being CPU-only anyway.
 
 **`FakeLLMClient` gained a `responses: list[LLMResponse]` sequencing mode**
 (returns them in order, then repeats the last) — needed to test the
@@ -739,17 +774,22 @@ it would clearly fail (blow past the canary by 2×+) if that regressed to
   cold-start measured at Stage 5c still suggests the eventual default needs
   to be well above a naive guess, or a separate, longer "model loading"
   timeout distinct from the steady-state per-request one.
-- Neither `llama-server`'s nor Ollama's process/model lifecycle (start with
-  the pinned model, health-check before sending traffic, stop on exit) is
-  managed by this tool yet — both clients only ever talk to a server
-  already running. Verified manually both times (started each by hand, ran
-  a real request through the full `config → build_client → complete()`
-  pipeline, and again for Stage 7 through the full orchestration path —
-  see "Stage 7 real-fixture verification" below); whoever eventually
-  automates that start needs to size `--ctx-size` as
-  `context_tokens * n_slots`, not just `context_tokens` — see the Stage 7
-  decision on `llama-server`'s shared-KV-cache slots above, found by that
-  same real-fixture run.
+- ~~Neither `llama-server`'s nor Ollama's process/model lifecycle... is
+  managed by this tool yet~~ — resolved for `llama_server` by
+  `extractor.llm.lifecycle` (see the decision above): `extractor.cli.run`
+  self-heals (starts it if `/health` doesn't answer) and
+  `scripts/smoke_test_backend.py` starts it at install time. **Still true
+  for Ollama** — its client only ever talks to a server already running,
+  and nothing starts, health-checks, or stops one; a reviewer who switches
+  `config/default.toml` to `ollama` needs to run it themselves. Not
+  addressed together with `llama_server` for the same reason
+  `fetch_runtime.py` never fetches Ollama's model either (below): this
+  session's actual `backend_unavailable` failure and manual-start workflow
+  were both against `llama_server`, and Ollama's own lifecycle (`ollama
+  serve`, `ollama pull`) is already a single external command a reviewer
+  runs themselves, unlike `llama-server`'s multi-flag,
+  `--ctx-size`-must-scale-with-`--parallel` startup this module exists to
+  get right.
 - The model startup digest check `PROJECT_NOTES.md` §6 describes (compare
   what's actually present against `config/default.toml`, refuse to run on
   mismatch) doesn't exist for either backend yet — `fetch_runtime.py`
@@ -789,10 +829,16 @@ it would clearly fail (blow past the canary by 2×+) if that regressed to
 - `llama-server`'s shared-KV-cache-across-slots behaviour (`kv_unified`,
   the decision above) means the practical, safe upper bound on `--workers`
   against a real `llama_server` backend is capped by how the server process
-  was started, not by anything Stage 7 itself enforces or even inspects —
-  `orchestrate.py` has no way to know the running server's `--parallel`
-  value and doesn't try to. `--workers 16` (requirement 5's stability bar)
-  was exercised only against the `fake` backend, which has no such ceiling.
+  was started. When `extractor.llm.lifecycle` is what starts it (the normal
+  path now — see the decision above), `--parallel` is always set to the
+  same `config.workers` used for `--ctx-size`'s multiplication, so the two
+  can't drift apart. `orchestrate.py` itself still has no way to know or
+  check this, though: a server started by hand before `run` (left alone by
+  `ensure_running()`'s health-check-first behaviour) can still have any
+  `--parallel` value a human gave it, and neither `ensure_running()` nor
+  `orchestrate.py` inspects `/slots` to confirm the two match. `--workers
+  16` (requirement 5's stability bar) was exercised only against the
+  `fake` backend, which has no such ceiling.
 - The circuit breaker's "last straw" attribution gap (a document whose own
   retries exhaust just before the *next* document's failure would have
   tripped the breaker gets individually quarantined instead of counted as
@@ -864,8 +910,10 @@ estimation approach or real hardware. `--workers` beyond the server's real
 `--parallel` slot count queues, as designed — but the server's `--ctx-size`
 also has to scale with `--parallel` (`kv_unified` shares one KV-cache budget
 across all slots), a real, found-not-designed-for constraint documented
-above; nothing currently sizes `--ctx-size` for a reviewer's eventual
-server-launch code.
+above; `extractor.llm.lifecycle` (the "Key decisions" entry above) now
+handles this whenever it's the one starting the server, but a
+manually-started one is still on the human who started it to size
+correctly.
 
 ## At 100× scale
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+import extractor.cli as cli_module
 from extractor.cli import app
 
 runner = CliRunner()
@@ -58,6 +59,43 @@ def test_run_processes_documents_end_to_end_with_fake_backend(tmp_path: Path) ->
 
     assert result.exit_code == 0
     assert "stop_reason=completed" in result.output
+
+
+def test_run_calls_backend_self_healing_before_processing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Wiring check for extractor.llm.lifecycle.ensure_backend_ready — the
+    real self-healing logic is covered in tests/test_llm_lifecycle.py
+    against httpx.MockTransport; here we only confirm `run` invokes it
+    (with the effective, override-applied config) before touching the
+    backend client, using the `fake` backend so nothing real is started.
+    """
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "a.txt").write_text("Faktura nr 1, kwota 100 zl", encoding="utf-8")
+    db = tmp_path / "out.sqlite"
+
+    calls = []
+    monkeypatch.setattr(
+        cli_module, "ensure_backend_ready", lambda cfg: calls.append(cfg)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--input",
+            str(src),
+            "--db",
+            str(db),
+            "--config",
+            str(_fake_backend_config(tmp_path)),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert calls[0].backend == "fake"
 
 
 def test_run_rejects_missing_input(tmp_path: Path) -> None:

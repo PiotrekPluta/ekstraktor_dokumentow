@@ -17,6 +17,7 @@ from extractor.db import connect as connect_db
 from extractor.eval import evaluate, format_eval_text, load_expected
 from extractor.inventory import build_inventory
 from extractor.llm import build_client
+from extractor.llm.lifecycle import ensure_backend_ready
 from extractor.orchestrate import run as orchestrate_run
 from extractor.report import compute_report, format_report_text
 
@@ -77,6 +78,12 @@ def run(
         limit=limit if limit is not None else cfg.limit,
         budget=budget if budget is not None else cfg.budget,
     )
+
+    # Self-healing (extractor.llm.lifecycle): a no-op for `fake`/`ollama`,
+    # and for `llama_server` a no-op too if something (a human, or
+    # setup.sh's smoke test) already has it listening — only starts a new
+    # process when `/health` doesn't answer.
+    ensure_backend_ready(effective)
 
     conn = connect_db(db)
     try:

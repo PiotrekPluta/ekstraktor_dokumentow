@@ -6,3 +6,4 @@ command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 
 uv sync --locked
 uv run python scripts/fetch_runtime.py
+uv run python scripts/smoke_test_backend.py

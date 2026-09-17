@@ -9,7 +9,10 @@ Zadanie rekrutacyjne polegające na utworzeniu narzędzia CLI, które będzie w 
 ```
 
 Requires `curl` (to bootstrap [`uv`](https://docs.astral.sh/uv/) if it isn't
-already installed). Network access is needed only for this step.
+already installed). Network access is needed only for this step. For the
+default (`llama_server`) backend, `setup.sh` also starts the pinned
+inference server and leaves it running — no separate manual step is
+needed before `run`.
 
 ## Run
 
@@ -19,6 +22,7 @@ uv run extractor report --db <plik.sqlite> [--json]
 uv run extractor eval   --db <plik.sqlite> --expected <expected.jsonl>
 ```
 
-**Status:** project skeleton only (see `docs/PROJECT_NOTES.md` §8, Stage 0).
-`run` / `report` / `eval` parse their arguments and load `config/`, but do
-not yet process documents — each exits with a "not implemented" message.
+`run` self-heals the backend: if the configured inference server isn't
+already answering (e.g. it was never started, or died since `setup.sh`),
+it starts it itself before processing, using the same pinned model/binary
+`setup.sh` fetched. A server started by hand is left alone and used as-is.
