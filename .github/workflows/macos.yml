@@ -1,0 +1,79 @@
+# Verifies this code on real macOS arm64 (GitHub's `macos-14` runner is an
+# M1). Correctness only, never performance — GitHub's own docs say Metal
+# Performance Shaders don't work under Apple's virtualisation on these
+# runners (docs/PROJECT_NOTES.md §5), so this can't stand in for real M1
+# throughput numbers (that needs actual hardware — see PROJECT_NOTES.md §5's
+# "Verifying on real hardware" options). It exists to catch macOS-specific
+# code bugs (docs/PROJECT_NOTES.md §7: bash 3.2, NFD filename normalisation,
+# `ru_maxrss` units, case-insensitive filesystem) before a real reviewer
+# would.
+#
+# Two jobs, deliberately different weight:
+#
+# - pytest-macos-arm64: the `fake`-backend test suite only — no network, no
+#   model, requirement 10's own bar. Runs on every push/PR since it's cheap.
+# - smoke-e2e-macos-arm64: a real `./setup.sh` + `extractor run --limit 1`
+#   against the actual pinned Bielik model. workflow_dispatch only (manual)
+#   — it downloads the real ~5GB GGUF every time, which is unnecessary
+#   weight for every commit. Uses config/ci_macos.toml, not
+#   config/default.toml: same pinned model, but with `-ngl 0` forced (see
+#   that file's own comments for why) and a generous timeout_s for the
+#   runner's slower, shared 3-core CPU.
+#
+# `uv` is installed once per job, before anything else, so both `./setup.sh`
+# (job 2) and the manual `uv sync`/`uv run` calls (job 1) find it on PATH —
+# this intentionally means job 2 never exercises setup.sh's own
+# `command -v uv || curl ... | sh` fallback line itself (it's already
+# satisfied), which is fine: that line is a shell/PATH concern, not part of
+# what this workflow exists to check.
+
+name: macOS arm64 (M1)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest-macos-arm64:
+    name: pytest (fake backend)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Run test suite (no network, no model, no API key — requirement 10)
+        run: uv run pytest -q
+
+  smoke-e2e-macos-arm64:
+    name: setup.sh + real run --limit 1 (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run setup.sh (fetch pinned model + llama-server, smoke-test the backend)
+        env:
+          EXTRACTOR_CONFIG_PATH: config/ci_macos.toml
+        run: ./setup.sh
+
+      - name: Real end-to-end run against data/corpus (--limit 1)
+        run: |
+          uv run extractor run \
+            --input data/corpus --db /tmp/ci.sqlite \
+            --limit 1 --config config/ci_macos.toml
+
+      - name: Report
+        run: uv run extractor report --db /tmp/ci.sqlite

@@ -486,6 +486,28 @@ local_cpu.toml` (untracked, this session's CPU-only dev config) sets
 `extra_args = ["-ngl", "0"]` explicitly rather than relying on this
 binary's being CPU-only anyway.
 
+**`.github/workflows/macos.yml`** runs this project's code on real macOS
+arm64 (GitHub's `macos-14` runner is an M1) — correctness only, never
+performance, per the same GitHub-arm64-has-no-working-Metal fact the
+`extra_args` decision above cites. Two jobs of deliberately different
+weight: `pytest-macos-arm64` (the `fake`-backend suite, no network/model,
+on every push/PR — cheap) and `smoke-e2e-macos-arm64` (a real
+`./setup.sh` + `extractor run --limit 1` against the actual pinned Bielik
+model, `workflow_dispatch`-only since it downloads the real ~5GB GGUF
+every time). The second job needs `-ngl 0` and a taller `timeout_s` than
+`config/default.toml` sets, but can't just edit `default.toml` (that stays
+the untouched M1-target default) — `config/ci_macos.toml` (committed, CI
+-only) pins the identical model/binary and adds only those two overrides.
+`scripts/smoke_test_backend.py` gained an `EXTRACTOR_CONFIG_PATH` env-var
+override (defaults to `config/default.toml`, unset for a real reviewer's
+plain `./setup.sh`) so the workflow can point it at `config/ci_macos.toml`
+without a second copy of the script or a reviewer-facing CLI flag nobody
+else needs. `fetch_runtime.py` itself takes no such override — it only
+ever fetches the one pinned model `config/default.toml` names, which is
+also what `config/ci_macos.toml` names, so there is only ever one
+`vendor/versions.lock` to produce or read regardless of which config a
+given step runs with.
+
 **`FakeLLMClient` gained a `responses: list[LLMResponse]` sequencing mode**
 (returns them in order, then repeats the last) — needed to test the
 repair-attempt path (invalid JSON, then valid) without a second test
