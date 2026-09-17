@@ -228,3 +228,5 @@ vendor/
 data/corpus/huge_*
 data/corpus_scale/
 *.sqlite
+
+my_run_testing/*

@@ -3,7 +3,14 @@
 Four tables, per docs/PROJECT_NOTES.md §8 Stage 7:
 
 - `runs` — one row per `extractor run` invocation (workers/limit/budget
-  requested, backend+model resolved, how it stopped).
+  requested, backend+model resolved, how it stopped). `price_*_per_million`
+  (Stage 8) is the `[pricing.<backend>]` rate *resolved at run time* and
+  frozen onto the row, not re-read from config later: `report`'s CLI
+  signature (`--db [--json]`, docs/ZADANIE.md §3) takes no `--config`, so
+  `estimated_cost` has to be computable from the db alone. Freezing the rate
+  per run (rather than assuming one global rate) also means a db spanning
+  runs against different backends/models still costs each token at the rate
+  that was actually active when it was spent.
 - `documents` — one row per *unique* document (after dedup), keyed by the
   dedup identity itself rather than a surrogate integer. See "Document
   identity" below.
@@ -72,7 +79,9 @@ CREATE TABLE IF NOT EXISTS runs (
     backend         TEXT NOT NULL,
     model           TEXT NOT NULL,
     config_path     TEXT NOT NULL,
-    input_path      TEXT NOT NULL
+    input_path      TEXT NOT NULL,
+    price_input_per_million  REAL NOT NULL DEFAULT 0.0,
+    price_output_per_million REAL NOT NULL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS documents (

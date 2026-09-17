@@ -5,6 +5,7 @@ staged implementation plan each command belongs to.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
@@ -13,9 +14,11 @@ import typer
 
 from extractor.config import load_config
 from extractor.db import connect as connect_db
+from extractor.eval import evaluate, format_eval_text, load_expected
 from extractor.inventory import build_inventory
 from extractor.llm import build_client
 from extractor.orchestrate import run as orchestrate_run
+from extractor.report import compute_report, format_report_text
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -89,20 +92,29 @@ def run(
 @app.command()
 def report(db: DbOpt, as_json: AsJsonOpt = False) -> None:
     """Print a report summarising the contents of DB (see docs/ZADANIE.md §7)."""
-    _not_implemented("report", f"would read db={db}, json={as_json}")
+    conn = connect_db(db)
+    try:
+        data = compute_report(conn)
+    finally:
+        conn.close()
+
+    if as_json:
+        typer.echo(json.dumps(data.as_dict(), ensure_ascii=False))
+    else:
+        typer.echo(format_report_text(data))
 
 
 @app.command(name="eval")
 def eval_(db: DbOpt, expected: ExpectedOpt) -> None:
     """Score DB against EXPECTED per field (see docs/ZADANIE.md §3)."""
-    _not_implemented("eval", f"would compare db={db} against expected={expected}")
+    records = load_expected(expected)
+    conn = connect_db(db)
+    try:
+        result = evaluate(conn, records)
+    finally:
+        conn.close()
 
-
-def _not_implemented(command: str, detail: str) -> None:
-    typer.echo(
-        f"'{command}' is not implemented yet (Stage 0 skeleton). {detail}", err=True
-    )
-    raise typer.Exit(code=1)
+    typer.echo(format_eval_text(result))
 
 
 def main() -> None:
