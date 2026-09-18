@@ -528,6 +528,12 @@ fresh `uv sync` this project had run. Fixed by changing `setup.sh` to
 everything both `pytest` and `ruff` need, matching `PROJECT_NOTES.md` §6's
 own stated intent ("do install it in `setup.sh` — requirement 10 has the
 reviewer run the tests") literally rather than only for the `dev` group.
+The first attempt at this fix touched only `setup.sh` and still failed on
+the next CI run, for a reason specific to this workflow rather than the
+underlying bug: `pytest-macos-arm64` deliberately never calls `setup.sh`
+(job 1 is the cheap job — no model fetch), so it has its own, separate
+`uv sync --locked` line in `.github/workflows/macos.yml` that needed the
+same `--all-groups` flag applied independently.
 
 **`FakeLLMClient` gained a `responses: list[LLMResponse]` sequencing mode**
 (returns them in order, then repeats the last) — needed to test the

@@ -47,7 +47,12 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Sync dependencies
-        run: uv sync --locked
+        # --all-groups: tests/test_generator.py needs the `datagen` group
+        # (Pillow/reportlab) just to be collected, not only `dev`
+        # (pytest/ruff) — see setup.sh's own comment on this same flag.
+        # This job intentionally doesn't call setup.sh (no model fetch), so
+        # it needs the same flag applied here independently.
+        run: uv sync --locked --all-groups
 
       - name: Run test suite (no network, no model, no API key — requirement 10)
         run: uv run pytest -q
