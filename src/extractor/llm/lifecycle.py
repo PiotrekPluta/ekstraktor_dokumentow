@@ -39,6 +39,16 @@ that a real M1 Mac needs Metal enabled on. `extra_args` (optional, under
 `[backend.llama_server]`) is the escape hatch for whichever flags a given
 environment actually needs, instead of a guess baked into this code that
 would be wrong for one of the two.
+
+`startup_timeout_s` (optional, under `[backend.llama_server]`, defaults to
+`DEFAULT_STARTUP_TIMEOUT_S` when absent so `config/default.toml`'s
+behaviour is unchanged) is how long `wait_until_healthy()` waits for
+`/health` after starting a fresh process — a different axis from
+`LlamaServerClient`'s own `timeout_s` (a single completion request, once
+already serving). Exists because the default (60s) was measured too tight
+for `macos-smoke-e2e.yml`'s shared `macos-14` runner: its log showed
+`load_model` start and then nothing for 60s straight, consistent with
+slow model loading on a resource-constrained CI box rather than a crash.
 """
 
 from __future__ import annotations
@@ -144,6 +154,9 @@ def _log_tail(log_path: Path | None) -> str:
     return f"\n\n--- last {min(len(lines), _LOG_TAIL_LINES)} line(s) of {log_path} ---\n{tail}"
 
 
+DEFAULT_PROGRESS_INTERVAL_S = 15.0
+
+
 def wait_until_healthy(
     host: str,
     port: int,
@@ -153,17 +166,33 @@ def wait_until_healthy(
     transport: httpx.BaseTransport | None = None,
     sleep: Callable[[float], None] = time.sleep,
     log_path: Path | None = None,
+    on_waiting: Callable[[float], None] | None = None,
+    progress_interval_s: float = DEFAULT_PROGRESS_INTERVAL_S,
 ) -> None:
-    deadline = time.monotonic() + timeout_s
+    """`on_waiting(elapsed_s)`, if given, is called roughly every
+    `progress_interval_s` while still waiting — model loading on a slow or
+    resource-constrained box (a shared CI runner, this project's own
+    CPU-only dev box earlier) can take long enough that a silent wait
+    looks indistinguishable from a hang in a CI log with no other output
+    in between. Not on by default: `extractor.cli.run`'s self-healing
+    stays quiet unless a caller opts in.
+    """
+    start = time.monotonic()
+    deadline = start + timeout_s
+    next_report = start + progress_interval_s
     while True:
         if is_healthy(host, port, transport=transport):
             return
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if now >= deadline:
             raise ServerLifecycleError(
                 f"llama-server did not become healthy within {timeout_s}s "
                 f"(http://{host}:{port}/health) — check its log."
                 f"{_log_tail(log_path)}"
             )
+        if on_waiting is not None and now >= next_report:
+            on_waiting(now - start)
+            next_report = now + progress_interval_s
         sleep(poll_interval_s)
 
 
@@ -178,6 +207,7 @@ def ensure_running(
     transport: httpx.BaseTransport | None = None,
     sleep: Callable[[float], None] = time.sleep,
     start_fn: Callable[[list[str], Path], subprocess.Popen] = start_process,
+    on_waiting: Callable[[float], None] | None = None,
 ) -> bool:
     """Idempotent: a `/health` 200 means some server (started by us before,
     by `setup.sh`'s smoke test, or by hand) is already answering on this
@@ -203,6 +233,7 @@ def ensure_running(
         transport=transport,
         sleep=sleep,
         log_path=log_path,
+        on_waiting=on_waiting,
     )
     return True
 
@@ -216,5 +247,9 @@ def ensure_backend_ready(config: Config, *, vendor_dir: Path = VENDOR_DIR) -> bo
         return False
     llama_cfg = config.raw["backend"]["llama_server"]
     return ensure_running(
-        llama_cfg, vendor_dir, config.workers, vendor_dir / "llama-server.log"
+        llama_cfg,
+        vendor_dir,
+        config.workers,
+        vendor_dir / "llama-server.log",
+        startup_timeout_s=llama_cfg.get("startup_timeout_s", DEFAULT_STARTUP_TIMEOUT_S),
     )
