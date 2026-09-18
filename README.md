@@ -1,20 +1,27 @@
 # ekstraktor_dokumentow
 
-Zadanie rekrutacyjne polegające na utworzeniu narzędzia CLI, które będzie w stanie wydobyć z nieustrukturyzowanych dokumentów podstawowe informacje o kontrahentach.
+CLI, które wydobywa ustrukturyzowane dane (typ dokumentu, dane kontrahenta,
+kwoty, walutę, streszczenie) z archiwum niestrukturyzowanych dokumentów przy
+użyciu lokalnego modelu językowego.
 
-## Setup
+## Instalacja
 
 ```
 ./setup.sh
 ```
 
-Requires `curl` (to bootstrap [`uv`](https://docs.astral.sh/uv/) if it isn't
-already installed). Network access is needed only for this step. For the
-default (`llama_server`) backend, `setup.sh` also starts the pinned
-inference server and leaves it running — no separate manual step is
-needed before `run`.
+Wymaga tylko `curl` (do zainstalowania [`uv`](https://docs.astral.sh/uv/),
+jeśli nie ma go jeszcze w systemie) — `uv` sam pobiera wymaganą wersję
+Pythona (3.12), więc nie trzeba mieć jej wcześniej zainstalowanej.
 
-## Run
+`setup.sh` instaluje zależności, pobiera przypięty model oraz binarkę
+`llama-server` i **uruchamia backend inferencji** — po zakończeniu tego
+kroku serwer już działa, żadna dodatkowa czynność nie jest potrzebna przed
+`run`.
+
+Sieć jest potrzebna wyłącznie na czas tego kroku.
+
+## Uruchomienie
 
 ```
 uv run extractor run    --input <katalog|zip> --db <plik.sqlite> [--workers N] [--limit N] [--budget N] [--config <plik>]
@@ -22,7 +29,8 @@ uv run extractor report --db <plik.sqlite> [--json]
 uv run extractor eval   --db <plik.sqlite> --expected <expected.jsonl>
 ```
 
-`run` self-heals the backend: if the configured inference server isn't
-already answering (e.g. it was never started, or died since `setup.sh`),
-it starts it itself before processing, using the same pinned model/binary
-`setup.sh` fetched. A server started by hand is left alone and used as-is.
+`run` dodatkowo samo-naprawia backend: jeśli skonfigurowany serwer
+inferencji akurat nie odpowiada (np. padł po zakończeniu `setup.sh`),
+uruchamia go ponownie tym samym, przypiętym modelem/binarką, zanim zacznie
+przetwarzanie. Serwer uruchomiony ręcznie jest wykrywany i pozostaje
+nietknięty.

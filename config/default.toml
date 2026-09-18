@@ -27,7 +27,9 @@ max_output_tokens = 300
 
 [backend]
 # One of: "fake" (tests, no network/model), "llama_server", "ollama".
-name = "llama_server"
+# TEMPORARY for this session's end-to-end ollama verification — reverted
+# back to "llama_server" afterward.
+name = "ollama"
 
 [backend.llama_server]
 host = "127.0.0.1"
@@ -64,6 +66,10 @@ port = 11434
 model_tag = "speakleash/bielik-4.5b-v3.0-instruct:q8_0"
 model_digest = "88067a36fa44882b76463bb6befd0d8593a031032495fa48b9f957c3cb23858b"
 context_tokens = 2048
+# TEMPORARY: this dev sandbox is CPU-only and much slower than the M1
+# target (per this session's own real llama_server measurements) —
+# reverted along with the backend switch above.
+timeout_s = 900
 
 # USD per 1,000,000 tokens. Local backends are 0.0 — the cost mechanism
 # still runs, it just always totals zero (docs/ZADANIE.md requirement 6).

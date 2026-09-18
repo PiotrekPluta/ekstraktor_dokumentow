@@ -156,4 +156,5 @@ Nie oczekujemy perfekcji. Oczekujemy, że wiesz, czego Twoje rozwiązanie nie ro
 
 - Szacowany nakład: jeden do dwóch wieczorów.
 - Korzystanie z asystentów AI przy implementacji jest oczekiwane i nie wpływa na ocenę.
-- Pytania do treści zadania: [michal.pietrusiewicz@hub.coop]. Nie odpowiadamy na pytania „czy X wystarczy". Odpowiadamy na pytania o niejasności w wymaganiach.
+- Pytania do treści zadania:
+ Nie odpowiadamy na pytania „czy X wystarczy". Odpowiadamy na pytania o niejasności w wymaganiach.

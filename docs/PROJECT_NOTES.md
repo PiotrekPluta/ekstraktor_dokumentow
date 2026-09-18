@@ -47,7 +47,7 @@ balance, integrity and quarantine first. Extraction accuracy last.
 
 ## 3. Open questions
 
-### For the recruiter (`michal.pietrusiewicz@hub.coop`)
+### For the recruiter 
 
 They answer questions about ambiguities, not "is X enough" questions.
 
