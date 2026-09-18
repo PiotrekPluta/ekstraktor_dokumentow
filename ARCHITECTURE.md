@@ -606,6 +606,25 @@ all), then read it back with `pypdfium2` — the same PDF library
 `extractor.textextract` itself uses — and confirmed the diacritics
 survive the full render-then-extract round trip.
 
+**`extractor.llm.lifecycle.wait_until_healthy()`'s timeout error now
+includes the last 40 lines of `llama-server.log`** — found missing when
+`macos-smoke-e2e.yml`'s first real run hit exactly this timeout with
+nothing else to go on: `start_process()` redirects the server's own
+stdout/stderr straight to that log file, never to whichever process
+called `ensure_running()`, so a CI step (or a `run` invocation) that
+doesn't separately `cat` the file got only "didn't become healthy",
+not *why*. `ServerLifecycleError`'s message is what both
+`extractor.cli.run`'s self-healing and `scripts/smoke_test_backend.py`
+ultimately print, so this fixes the diagnostic gap for both callers from
+one place rather than adding a log-printing step to the workflow only.
+Whether that first real timeout is model-loading being genuinely slower
+on a shared, 3-core `macos-14` runner, or `llama-server` (even with
+`-ngl 0`) still probing the Metal backend at startup under a VM where
+Metal Performance Shaders don't work (`PROJECT_NOTES.md` §5 — the same
+fact the `extra_args` decision above cites) is not yet known; this is
+what the next run's log tail is for, before raising `startup_timeout_s`
+on a guess.
+
 **`FakeLLMClient` gained a `responses: list[LLMResponse]` sequencing mode**
 (returns them in order, then repeats the last) — needed to test the
 repair-attempt path (invalid JSON, then valid) without a second test

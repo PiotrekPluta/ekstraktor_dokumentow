@@ -133,6 +133,39 @@ def test_wait_until_healthy_raises_after_timeout() -> None:
         )
 
 
+def test_wait_until_healthy_timeout_includes_log_tail(tmp_path: Path) -> None:
+    log_path = tmp_path / "llama-server.log"
+    log_path.write_text("line one\nline two\nfatal: something went wrong\n")
+    transport = _transport(lambda request: httpx.Response(503, text="loading"))
+
+    with pytest.raises(ServerLifecycleError, match="fatal: something went wrong"):
+        wait_until_healthy(
+            "127.0.0.1",
+            8080,
+            timeout_s=0.0,
+            poll_interval_s=0.0,
+            transport=transport,
+            sleep=lambda _s: None,
+            log_path=log_path,
+        )
+
+
+def test_wait_until_healthy_timeout_without_log_file_omits_tail(tmp_path: Path) -> None:
+    transport = _transport(lambda request: httpx.Response(503, text="loading"))
+
+    with pytest.raises(ServerLifecycleError) as exc_info:
+        wait_until_healthy(
+            "127.0.0.1",
+            8080,
+            timeout_s=0.0,
+            poll_interval_s=0.0,
+            transport=transport,
+            sleep=lambda _s: None,
+            log_path=tmp_path / "missing.log",
+        )
+    assert "---" not in str(exc_info.value)
+
+
 # --- ensure_running --------------------------------------------------------
 
 
