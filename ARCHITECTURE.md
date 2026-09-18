@@ -625,6 +625,30 @@ fact the `extra_args` decision above cites) is not yet known; this is
 what the next run's log tail is for, before raising `startup_timeout_s`
 on a guess.
 
+**That next run's log tail ruled out a clean crash, at least**: it showed
+`load_model: loading model '...'` and then nothing else for the full 60s
+— no error, no stack trace, and also none of the near-instant GGUF-header
+metadata lines (`print_info: ...`) that normally follow within
+milliseconds of that line on a working load, which reads as either a
+genuinely slow first read on this runner's disk, or a stall very early in
+opening/mmapping the 5GB file, not a mid-load slowdown. Two follow-ups,
+both to test that "slow, not stuck" hypothesis before assuming a hang:
+
+- `startup_timeout_s` (optional, under `[backend.llama_server]`, same
+  absent-means-unchanged pattern as `timeout_s`/`extra_args`) makes the
+  `/health`-wait window itself configurable — a different axis from
+  `timeout_s` (a single completion request, once already serving).
+  `config/ci_macos.toml` raises it to 600s as the experiment; if it still
+  times out even there, that points at an actual stall rather than
+  slowness.
+- `wait_until_healthy()` gained an optional `on_waiting(elapsed_s)`
+  callback, fired roughly every 15s while still waiting (not on by
+  default — `extractor.cli.run`'s self-healing stays quiet;
+  `scripts/smoke_test_backend.py` opts in). Without it, a multi-minute
+  wait produces zero output in between "ensuring llama-server is up..."
+  and either success or the timeout, which is indistinguishable from a
+  hung CI job from the outside.
+
 **`FakeLLMClient` gained a `responses: list[LLMResponse]` sequencing mode**
 (returns them in order, then repeats the last) — needed to test the
 repair-attempt path (invalid JSON, then valid) without a second test

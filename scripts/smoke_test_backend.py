@@ -39,7 +39,12 @@ import tomllib
 from pathlib import Path
 
 from extractor.llm.client import LLMError, LLMRequest
-from extractor.llm.lifecycle import VENDOR_DIR, ServerLifecycleError, ensure_running
+from extractor.llm.lifecycle import (
+    DEFAULT_STARTUP_TIMEOUT_S,
+    VENDOR_DIR,
+    ServerLifecycleError,
+    ensure_running,
+)
 from extractor.llm.llama_server import LlamaServerClient
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -65,13 +70,25 @@ def main() -> None:
     llama_cfg = config["backend"]["llama_server"]
     n_slots = config.get("run", {}).get("workers", 4)
     log_path = VENDOR_DIR / "llama-server.log"
+    startup_timeout_s = llama_cfg.get("startup_timeout_s", DEFAULT_STARTUP_TIMEOUT_S)
 
     print(
         f"smoke_test_backend: ensuring llama-server is up on {llama_cfg['host']}:"
-        f"{llama_cfg['port']} (--parallel {n_slots})..."
+        f"{llama_cfg['port']} (--parallel {n_slots}, startup_timeout_s="
+        f"{startup_timeout_s})..."
     )
     try:
-        started = ensure_running(llama_cfg, VENDOR_DIR, n_slots, log_path)
+        started = ensure_running(
+            llama_cfg,
+            VENDOR_DIR,
+            n_slots,
+            log_path,
+            startup_timeout_s=startup_timeout_s,
+            on_waiting=lambda elapsed: print(
+                f"smoke_test_backend: still waiting for /health "
+                f"({elapsed:.0f}s elapsed)..."
+            ),
+        )
     except ServerLifecycleError as exc:
         print(f"smoke_test_backend: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

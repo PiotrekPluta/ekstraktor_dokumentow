@@ -12,6 +12,7 @@ import pytest
 
 from extractor.config import Config
 from extractor.llm.lifecycle import (
+    DEFAULT_STARTUP_TIMEOUT_S,
     ServerLifecycleError,
     build_argv,
     ensure_backend_ready,
@@ -150,6 +151,53 @@ def test_wait_until_healthy_timeout_includes_log_tail(tmp_path: Path) -> None:
         )
 
 
+def test_wait_until_healthy_calls_on_waiting_periodically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fake, controllable clock rather than real sleeping: each failed
+    health check "costs" 5s of fake elapsed time, so with a 10s
+    progress_interval_s, on_waiting should fire roughly every other call —
+    deterministic regardless of how fast this machine actually runs it.
+    """
+    from extractor.llm import lifecycle
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(lifecycle.time, "monotonic", lambda: clock["t"])
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        clock["t"] += 5.0
+        if calls["n"] < 6:
+            return httpx.Response(503, text="loading")
+        return httpx.Response(200, json={"status": "ok"})
+
+    reports = []
+    wait_until_healthy(
+        "127.0.0.1",
+        8080,
+        timeout_s=100.0,
+        poll_interval_s=0.0,
+        transport=_transport(handler),
+        sleep=lambda _s: None,
+        on_waiting=reports.append,
+        progress_interval_s=10.0,
+    )
+
+    assert len(reports) >= 1
+    assert all(r > 0 for r in reports)
+
+
+def test_wait_until_healthy_omits_progress_reports_when_on_waiting_is_none() -> None:
+    # No on_waiting given: must not raise just because there's nothing to
+    # call — the default, quiet path (extractor.cli.run's self-healing).
+    transport = _transport(lambda request: httpx.Response(200, json={"status": "ok"}))
+    wait_until_healthy(
+        "127.0.0.1", 8080, timeout_s=5.0, poll_interval_s=0.0, transport=transport
+    )
+
+
 def test_wait_until_healthy_timeout_without_log_file_omits_tail(tmp_path: Path) -> None:
     transport = _transport(lambda request: httpx.Response(503, text="loading"))
 
@@ -279,3 +327,39 @@ def test_ensure_backend_ready_delegates_to_ensure_running(
     assert seen["vendor_dir"] == tmp_path
     assert seen["n_slots"] == 7
     assert seen["log_path"] == tmp_path / "llama-server.log"
+
+
+def test_ensure_backend_ready_uses_default_startup_timeout_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from extractor.llm import lifecycle
+
+    seen = {}
+    monkeypatch.setattr(
+        lifecycle,
+        "ensure_running",
+        lambda *a, **kwargs: seen.update(kwargs) or True,
+    )
+
+    ensure_backend_ready(_config("llama_server"), vendor_dir=tmp_path)
+
+    assert seen["startup_timeout_s"] == DEFAULT_STARTUP_TIMEOUT_S
+
+
+def test_ensure_backend_ready_honours_configured_startup_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from extractor.llm import lifecycle
+
+    seen = {}
+    monkeypatch.setattr(
+        lifecycle,
+        "ensure_running",
+        lambda *a, **kwargs: seen.update(kwargs) or True,
+    )
+    cfg = _config("llama_server")
+    cfg.raw["backend"]["llama_server"] = {**LLAMA_CFG, "startup_timeout_s": 600.0}
+
+    ensure_backend_ready(cfg, vendor_dir=tmp_path)
+
+    assert seen["startup_timeout_s"] == 600.0
