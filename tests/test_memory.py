@@ -28,6 +28,7 @@ with no local pre-step.
 from __future__ import annotations
 
 import resource
+import sys
 from pathlib import Path
 
 from extractor.db import connect
@@ -52,8 +53,18 @@ def _write_huge_file(path: Path) -> None:
 
 
 def _ru_maxrss_kb() -> tuple[int, int]:
+    """`ru_maxrss` is kilobytes on Linux but *bytes* on macOS/BSD (this
+    module's own docstring already names the fact; this is that
+    conversion actually being applied) — found missing here for real: an
+    unconverted macOS value reported a spurious ~6M "KB" (~6GB) of growth
+    for what was actually a ~6MB, entirely expected bump, caught by the
+    `pytest-macos-arm64` CI job (docs/PROJECT_NOTES.md §7).
+    """
     usage_self = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     usage_children = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    if sys.platform == "darwin":
+        usage_self //= 1024
+        usage_children //= 1024
     return usage_self, usage_children
 
 

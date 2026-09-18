@@ -25,11 +25,26 @@ from reportlab.platypus import (
 
 from .models import Block
 
+# Vendored (scripts/generator/assets/, DEJAVU-LICENSE alongside — Bitstream
+# Vera License, free redistribution) rather than relying on a
+# system-installed font: found via a real macOS arm64 CI run
+# (pytest-macos-arm64) that this project's own real evaluation machine is
+# macOS, which doesn't ship `fonts-dejavu-core` the way the Linux dev/CI
+# path assumed — a system-path-only lookup would fail identically there.
+# Checked first; the old system paths stay as a fallback for anyone with a
+# non-vendored checkout of just this file. version_2_37, upstream sha256
+# 7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954
+# (regular) / e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724
+# (bold), cross-verified against both of upstream's own release assets
+# (the family tarball and the Sans-only zip) before vendoring.
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _FONT_CANDIDATES = [
+    str(_ASSETS_DIR / "DejaVuSans.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans.ttf",
 ]
 _FONT_BOLD_CANDIDATES = [
+    str(_ASSETS_DIR / "DejaVuSans-Bold.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
 ]
@@ -47,8 +62,8 @@ def ensure_font_registered() -> None:
     bold = next((p for p in _FONT_BOLD_CANDIDATES if Path(p).exists()), None)
     if regular is None:
         raise RuntimeError(
-            "DejaVu Sans font not found; install the 'fonts-dejavu-core' package "
-            "(see docs/PROJECT_NOTES.md section 6)."
+            "DejaVu Sans font not found in scripts/generator/assets/ or any "
+            "system font directory (see docs/PROJECT_NOTES.md section 6)."
         )
     pdfmetrics.registerFont(TTFont(FONT_NAME, regular))
     if bold:
@@ -59,14 +74,49 @@ def ensure_font_registered() -> None:
 def _styles() -> dict:
     ensure_font_registered()
     base = getSampleStyleSheet()
-    bold_name = _FONT_BOLD_NAME if pdfmetrics.getRegisteredFontNames().count(_FONT_BOLD_NAME) else FONT_NAME
+    bold_name = (
+        _FONT_BOLD_NAME
+        if pdfmetrics.getRegisteredFontNames().count(_FONT_BOLD_NAME)
+        else FONT_NAME
+    )
     return {
-        "normal": ParagraphStyle("normal", parent=base["Normal"], fontName=FONT_NAME, fontSize=10, leading=13),
-        "normal_bold": ParagraphStyle("normal_bold", parent=base["Normal"], fontName=bold_name, fontSize=10, leading=13),
-        "normal_right": ParagraphStyle("normal_right", parent=base["Normal"], fontName=FONT_NAME, fontSize=10, leading=13, alignment=TA_RIGHT),
-        "small": ParagraphStyle("small", parent=base["Normal"], fontName=FONT_NAME, fontSize=7, leading=9),
-        "small_right": ParagraphStyle("small_right", parent=base["Normal"], fontName=FONT_NAME, fontSize=7, leading=9, alignment=TA_RIGHT),
-        "heading": ParagraphStyle("heading", parent=base["Heading2"], fontName=bold_name, fontSize=14, leading=18, alignment=TA_CENTER),
+        "normal": ParagraphStyle(
+            "normal", parent=base["Normal"], fontName=FONT_NAME, fontSize=10, leading=13
+        ),
+        "normal_bold": ParagraphStyle(
+            "normal_bold",
+            parent=base["Normal"],
+            fontName=bold_name,
+            fontSize=10,
+            leading=13,
+        ),
+        "normal_right": ParagraphStyle(
+            "normal_right",
+            parent=base["Normal"],
+            fontName=FONT_NAME,
+            fontSize=10,
+            leading=13,
+            alignment=TA_RIGHT,
+        ),
+        "small": ParagraphStyle(
+            "small", parent=base["Normal"], fontName=FONT_NAME, fontSize=7, leading=9
+        ),
+        "small_right": ParagraphStyle(
+            "small_right",
+            parent=base["Normal"],
+            fontName=FONT_NAME,
+            fontSize=7,
+            leading=9,
+            alignment=TA_RIGHT,
+        ),
+        "heading": ParagraphStyle(
+            "heading",
+            parent=base["Heading2"],
+            fontName=bold_name,
+            fontSize=14,
+            leading=18,
+            alignment=TA_CENTER,
+        ),
     }
 
 
