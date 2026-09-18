@@ -19,6 +19,14 @@
 #   this project already hit once on a different CPU-only box.
 # - workers = 1: this job's whole point is one real `--limit 1` completion,
 #   not throughput.
+# - startup_timeout_s raised from the 60s default: the first real
+#   macos-smoke-e2e.yml run timed out waiting for /health, and
+#   vendor/llama-server.log (now tailed into the error message —
+#   extractor.llm.lifecycle) showed `load_model` start and then nothing
+#   for 60s straight — consistent with slow model loading on this shared,
+#   3-core runner rather than a crash (no error was logged). 600s is a
+#   hypothesis test: if it still times out even here, that points to an
+#   actual hang instead, not just slowness.
 
 [run]
 workers = 1
@@ -37,6 +45,7 @@ model_sha256 = "562f2291de257890adf2b4a914da8b194affe6a7a838a6b7ef3d342f306c1b7f
 model_size_bytes = 5061215424
 context_tokens = 2048
 timeout_s = 900
+startup_timeout_s = 600
 extra_args = ["-ngl", "0"]
 
 [backend.llama_server.server_binary]

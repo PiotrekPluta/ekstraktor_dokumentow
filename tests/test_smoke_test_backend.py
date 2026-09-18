@@ -103,10 +103,11 @@ def test_succeeds_when_server_healthy_and_completion_works(
         "context_tokens = 2048\n",
         encoding="utf-8",
     )
-    seen_n_slots = {}
+    seen = {}
 
-    def fake_ensure_running(llama_cfg, vendor_dir, n_slots, log_path):
-        seen_n_slots["value"] = n_slots
+    def fake_ensure_running(llama_cfg, vendor_dir, n_slots, log_path, **kwargs):
+        seen["n_slots"] = n_slots
+        seen["kwargs"] = kwargs
         return True
 
     monkeypatch.setattr(smoke_test_backend, "ensure_running", fake_ensure_running)
@@ -118,5 +119,38 @@ def test_succeeds_when_server_healthy_and_completion_works(
 
     smoke_test_backend.main()  # must not raise
 
-    assert seen_n_slots["value"] == 2
+    assert seen["n_slots"] == 2
+    assert (
+        seen["kwargs"]["startup_timeout_s"]
+        == smoke_test_backend.DEFAULT_STARTUP_TIMEOUT_S
+    )
+    assert callable(seen["kwargs"]["on_waiting"])
+    seen["kwargs"]["on_waiting"](12.3)  # must not raise
     assert "OK" in capsys.readouterr().out
+
+
+def test_passes_configured_startup_timeout_s_through(
+    _config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _config_path.write_text(
+        '[backend]\nname = "llama_server"\n\n'
+        '[backend.llama_server]\nhost = "127.0.0.1"\nport = 8080\n'
+        "context_tokens = 2048\nstartup_timeout_s = 600\n",
+        encoding="utf-8",
+    )
+    seen = {}
+
+    def fake_ensure_running(llama_cfg, vendor_dir, n_slots, log_path, **kwargs):
+        seen["startup_timeout_s"] = kwargs["startup_timeout_s"]
+        return True
+
+    monkeypatch.setattr(smoke_test_backend, "ensure_running", fake_ensure_running)
+    monkeypatch.setattr(
+        smoke_test_backend.LlamaServerClient,
+        "complete",
+        lambda self, request: LLMResponse(text="hi", tokens_in=1, tokens_out=1),
+    )
+
+    smoke_test_backend.main()
+
+    assert seen["startup_timeout_s"] == 600
