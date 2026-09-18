@@ -8,44 +8,20 @@ Stan na koniec developmentu:
 
 ## Kluczowe decyzje
 
-- **Tożsamość dokumentu to sam hash deduplikacyjny**, nie sztuczny klucz:
-  `documents.id` = sha256 znormalizowanego tekstu (lub surowych bajtów, gdy
-  ekstrakcja się nie uda). Sortowanie po `id` daje deterministyczną
+- **ID dokumentu to sam hash deduplikacyjny**
+  `documents.id` = sha256 znormalizowanego tekstu (lub surowych bajtów, gdy ekstrakcja się nie uda). Sortowanie po `id` daje deterministyczną
   kolejność przetwarzania.
-- **Dwupoziomowy dedup**: najpierw sha256 bajtów (kopie 1:1), potem hash
-  znormalizowanego tekstu (NFC, zwinięte białe znaki, bez linii-separatorów)
-  — świadomie wąski, nie łączy niemal identycznych faktur z jednego szablonu.
-- **Załącznik `.eml`, nie treść maila, staje się treścią dokumentu**, gdy
-  jest realnym, wyodrębnialnym plikiem — nazwa załącznika nigdy nie buduje
-  ścieżki na dysku (strukturalna ochrona przed path traversal).
-- **Model przypięty do konkretnego commitu i sha256**:
-  `speakleash/Bielik-4.5B-v3.0-Instruct-GGUF`, kwantyzacja `Q8_0` (~5,1GB),
-  zweryfikowany bezpośrednio względem API Hugging Face. Binarka
-  `llama-server` przypięta do tagu release'u `ggml-org/llama.cpp` (`b10985`)
-  z lokalnie policzonym sha256 (llama.cpp nie publikuje sum kontrolnych).
-- **`tokenizer.json` musi być lokalnie pobrany i wpisany do repo w
-  `assets/tokenizer.json`, a nie pobierany przez `setup.sh`.** Bazowe (nie
-  -GGUF) repo Bielika na Hugging Face, które udostępnia ten plik, jest
-  zamknięte (gated) — `scripts/fetch_runtime.py` nie ma jak się do niego
-  nieinteraktywnie uwierzytelnić. Plik ma ~3,7MB i został dodany do repozytorium. 
+
+- **Model i server przypięte do konkretnego commitu i sha256**:
+  `speakleash/Bielik-4.5B-v3.0-Instruct-GGUF`, kwantyzacja `Q8_0` (~5,1GB), zweryfikowany bezpośrednio względem API Hugging Face. 
+  Binarka `llama-server` przypięta do tagu release'u `ggml-org/llama.cpp` (`b10985`)
+- **`tokenizer.json`** jest wykorzystywany do obliczania tokenów a nie narzędzie dostarczane przez backend aby możliwe było przełączenie się między backendami.
+
 - **Backend wybierany wyłącznie przez konfigurację** (`llama_server` /
-  `ollama` / `fake`), zero zmian w kodzie. Tag Ollamy
-  (`speakleash/bielik-4.5b-v3.0-instruct:q8_0`) zweryfikowany względem
-  registry Ollamy — ten sam sha256 wag co GGUF dla `llama_server`.
-- **Retry + circuit breaker to jeden wspólny dekorator** (`ResilientLLMClient`)
-  wokół każdego backendu, nie osobna logika per backend. Otwarty breaker nie
-  ma trybu "half-open" w trakcie runu — odzyskanie następuje dopiero przy
-  wznowieniu (nowy klient, nowy breaker). Bezpośrednio realizuje wymaganie 5:
-  chwilowa niedostępność backendu kończy run z `stop_reason=backend_unavailable`,
-  a dokument w locie wraca do `pending`, nigdy nie ginie.
+  `ollama` / `fake`)
+
+- **Retry + circuit breaker to jeden wspólny dekorator** (`ResilientLLMClient`) wokół każdego backendu, nie osobna logika per backend. 
 - **Ekstrakcja tekstu izolowana per plik, w osobnym procesie z timeoutem**
-  (`multiprocessing`, wymuszone `spawn` wszędzie — jak domyślnie na macOS):
-  zawieszony wywołanie C wewnątrz `pypdfium2` nie da się przerwać na
-  poziomie Pythona inaczej niż zabijając cały proces.
-- **Budżet kontekstu okna (`windowing`) liczony per uruchomienie**, nie na
-  sztywno: odejmuje realny narzut promptu systemowego i podwójny
-  `max_output_tokens` (rezerwa na turę naprawczą) od `context_tokens`
-  backendu, zanim cokolwiek trafi do modelu.
 - **Schemat JSON trafia do modelu strukturalnie** (parametr `json_schema`,
   wymuszona gramatyka po stronie serwera), nigdy jako wklejony tekst w
   promptcie — wklejona wersja sama w sobie zajmowała więcej miejsca niż
@@ -57,10 +33,7 @@ Stan na koniec developmentu:
 - **Błędna suma kontrolna NIP jest tylko informacyjna**, nigdy nie odrzuca
   ani nie zeruje wartości pola.
 - **`--limit`/`--budget` są kumulatywne w całej historii bazy**, nie per
-  wywołanie — jedyna interpretacja spójna z wymaganiem 4 (ten sam zestaw
-  rekordów niezależnie od liczby przerwań). Rezerwacje tokenów w
-  `token_ledger` nigdy nie są zwalniane, nawet po zabiciu procesu w trakcie
-  wywołania — budżet nigdy nie zostanie realnie przekroczony.
+  wywołanie
 - **Ochrona przed wstrzyknięciem treści jest strukturalna, nie treściowa**:
   każdy zapis do bazy dotyczy wyłącznie wiersza jednego, konkretnego
   dokumentu (parametryzowane zapytania, `document_id` nadawany przez kod,
@@ -81,9 +54,7 @@ Stan na koniec developmentu:
 - Progi retry/backoff/circuit-breakera są zahardkodowane, nieskonfigurowalne
   przez plik konfiguracyjny (poza timeoutem pojedynczego zapytania).
 - Sprawdzenie „wartość występuje w źródle" nie chroni przed spreparowanym,
-  fałszywym blokiem JSON osadzonym w treści dokumentu — rzeczywistą
-  ochronę integralności (wymaganie 8) daje wyłącznie zapis ograniczony do
-  jednego wiersza, nie ta walidacja.
+  fałszywym blokiem JSON osadzonym w treści dokumentu 
 - `eval`: metryka `summary` nie sprawdza języka wyniku; `nip_checksum_valid`
   jest napisany, ale nigdzie niewpięty do raportu (dałby dużo fałszywych
   alarmów na zagranicznych kontrahentach).
