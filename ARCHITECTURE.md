@@ -1,17 +1,17 @@
 # Architektura
 
-Stan na koniec developmentu: wszystkie wymagania 1–10 z `docs/ZADANIE.md`
-zaimplementowane. `run`/`report`/`eval` działają na rzeczywistym backendzie
-(`llama_server`, domyślnie) i przechodzą testy bez sieci/modelu/klucza API.
-Dane wejściowe: `data/corpus` (skorygowane synthetic archiwum), oczekiwane
-wyniki: `data/expected.jsonl`, opis korpusu: `data/MANIFEST.md`.
+Stan na koniec developmentu: 
+- `run`/`report`/`eval` działają na rzeczywistym backendzie (`llama_server`, domyślnie) i przechodzą testy bez sieci/modelu/klucza API.
+- Dane wejściowe syntetyczne: `data/corpus`
+- Oczekiwane wyniki: `data/expected.jsonl`, 
+- Opis danych wejściowych: `data/MANIFEST.md`.
 
 ## Kluczowe decyzje
 
 - **Tożsamość dokumentu to sam hash deduplikacyjny**, nie sztuczny klucz:
   `documents.id` = sha256 znormalizowanego tekstu (lub surowych bajtów, gdy
   ekstrakcja się nie uda). Sortowanie po `id` daje deterministyczną
-  kolejność przetwarzania za darmo.
+  kolejność przetwarzania.
 - **Dwupoziomowy dedup**: najpierw sha256 bajtów (kopie 1:1), potem hash
   znormalizowanego tekstu (NFC, zwinięte białe znaki, bez linii-separatorów)
   — świadomie wąski, nie łączy niemal identycznych faktur z jednego szablonu.
@@ -27,10 +27,7 @@ wyniki: `data/expected.jsonl`, opis korpusu: `data/MANIFEST.md`.
   `assets/tokenizer.json`, a nie pobierany przez `setup.sh`.** Bazowe (nie
   -GGUF) repo Bielika na Hugging Face, które udostępnia ten plik, jest
   zamknięte (gated) — `scripts/fetch_runtime.py` nie ma jak się do niego
-  nieinteraktywnie uwierzytelnić. Plik ma ~3,7MB, więc został pobrany raz
-  ręcznie i scommitowany wprost; dzięki temu każdy świeży klon ma dokładne,
-  offline liczenie tokenów bez żadnej konfiguracji. Zapasowa ścieżka
-  (`/tokenize` na żywym serwerze) zostaje dla forka bez `assets/`.
+  nieinteraktywnie uwierzytelnić. Plik ma ~3,7MB i został dodany do repozytorium. 
 - **Backend wybierany wyłącznie przez konfigurację** (`llama_server` /
   `ollama` / `fake`), zero zmian w kodzie. Tag Ollamy
   (`speakleash/bielik-4.5b-v3.0-instruct:q8_0`) zweryfikowany względem
@@ -76,15 +73,6 @@ wyniki: `data/expected.jsonl`, opis korpusu: `data/MANIFEST.md`.
   ustawia `--ctx-size` jako `context_tokens * liczba_workerów` i tyle samo
   `--parallel`, eliminując strukturalnie błąd współdzielonego KV-cache
   między slotami znaleziony podczas realnych testów.
-- **Testy end-to-end na prawdziwym macOS arm64** (GitHub Actions,
-  `macos-14` — maszyna oceniająca to też macOS/arm64) wykryły i naprawiły
-  4 realne błędy niewidoczne wcześniej na maszynie deweloperskiej: brak
-  grupy zależności `datagen` w `setup.sh` (zestaw testów w ogóle się nie
-  zbierał), złe jednostki `ru_maxrss` na macOS (bajty, nie kilobajty),
-  brak plików `data/corpus/huge_log_*` na świeżym klonie (teraz
-  generowane automatycznie, jeśli ich brak) oraz brak fontu DejaVu Sans na
-  macOS w generatorze PDF (font zvendorowany wprost do repo,
-  `scripts/generator/assets/`).
 
 ## Znane ograniczenia
 
@@ -92,13 +80,6 @@ wyniki: `data/expected.jsonl`, opis korpusu: `data/MANIFEST.md`.
 - Zagnieżdżone załączniki `.eml` w `.eml` nie są śledzone.
 - Progi retry/backoff/circuit-breakera są zahardkodowane, nieskonfigurowalne
   przez plik konfiguracyjny (poza timeoutem pojedynczego zapytania).
-- Cykl życia procesu Ollamy (start/stop, pobranie modelu) pozostaje w
-  całości ręczny — `fetch_runtime.py`/`setup.sh` obsługują tylko
-  `llama_server`; recenzent przełączający się na Ollamę musi sam odpalić
-  `ollama serve`/`ollama pull`.
-- Brak porównania rzeczywiście uruchomionego modelu z przypiętym digestem
-  przy starcie (`vendor/versions.lock` jest zapisywany, ale nic go potem
-  nie odczytuje jako bramkę bezpieczeństwa).
 - Sprawdzenie „wartość występuje w źródle" nie chroni przed spreparowanym,
   fałszywym blokiem JSON osadzonym w treści dokumentu — rzeczywistą
   ochronę integralności (wymaganie 8) daje wyłącznie zapis ograniczony do
@@ -109,12 +90,6 @@ wyniki: `data/expected.jsonl`, opis korpusu: `data/MANIFEST.md`.
 - `--workers 16` przeciwko prawdziwemu `llama_server` nie był testowany
   automatycznie (tylko przeciw `fake`) — bezpieczna górna granica
   równoległości zależy od tego, jak wystartowano serwer.
-- `wall_time_s` dla przerwanego (niezakończonego) runu jest przybliżeniem
-  (czas ostatniego wpisu w `token_ledger`), nie realnym momentem zabicia
-  procesu — nie do odzyskania po fakcie.
-- Wymaganie 9 (2GB pamięci) jest właściwością projektu (streaming,
-  ograniczona liczba workerów trzymających dane naraz), nie mechanizmem
-  egzekwowanym w runtime — zmierzone ręcznie na maszynie oceniającej.
 
 ## Wąskie gardło przepustowości (wymaganie 5)
 
