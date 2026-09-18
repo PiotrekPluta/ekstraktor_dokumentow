@@ -1,0 +1,66 @@
+# CI-only override for `.github/workflows/macos.yml`'s manual, end-to-end
+# job — NOT what a reviewer uses (`config/default.toml`, unmodified, stays
+# the M1-target default `./setup.sh`/`extractor run` read by themselves).
+# Pins the exact same model/binary as `config/default.toml` (fetch_runtime.py
+# is never overridable — there is only ever one pinned model to fetch) and
+# only adds what running on GitHub's `macos-14` runner actually needs:
+#
+# - extra_args = ["-ngl", "0"]: GitHub's own arm64 macOS runners don't have
+#   working Metal under Apple's virtualisation (docs/PROJECT_NOTES.md §5),
+#   so offloading to GPU would be wrong here even though `platform.system()`
+#   reports "Darwin"/"arm64" exactly like a real M1 does — the reason
+#   extractor.llm.lifecycle deliberately never guesses `-ngl` from the
+#   platform and exposes this escape hatch instead.
+# - timeout_s raised well above the 60s client default: the runner is a
+#   shared 3-core VM (PROJECT_NOTES.md §5), not real M1 hardware, so
+#   per-request latency on CPU-only inference is expected to be slow —
+#   the same class of failure (`stop_reason=backend_unavailable` from the
+#   circuit breaker tripping before a slow-but-working request finishes)
+#   this project already hit once on a different CPU-only box.
+# - workers = 1: this job's whole point is one real `--limit 1` completion,
+#   not throughput.
+
+[run]
+workers = 1
+max_output_tokens = 300
+
+[backend]
+name = "llama_server"
+
+[backend.llama_server]
+host = "127.0.0.1"
+port = 8080
+model_repo = "speakleash/Bielik-4.5B-v3.0-Instruct-GGUF"
+model_revision = "3ee7b47bcd0ad7bc6a4c45bb7bad3e0b2fe066ad"  # pinned commit, not a branch
+model_file = "Bielik-4.5B-v3.0-Instruct.Q8_0.gguf"
+model_sha256 = "562f2291de257890adf2b4a914da8b194affe6a7a838a6b7ef3d342f306c1b7f"
+model_size_bytes = 5061215424
+context_tokens = 2048
+timeout_s = 900
+extra_args = ["-ngl", "0"]
+
+[backend.llama_server.server_binary]
+release_tag = "b10985"
+macos_arm64_asset = "llama-b10985-bin-macos-arm64.tar.gz"
+macos_arm64_sha256 = "af0c49bbc35add2cdfcdfd9b6fd1fa6d30a9087d4950561fbd6ebda37bd4fe2d"
+ubuntu_x64_asset = "llama-b10985-bin-ubuntu-x64.tar.gz"
+ubuntu_x64_sha256 = "9813c959e82de406cddc562fcb48a42400df330a922326cf8b547859f609ee5e"
+
+[backend.ollama]
+host = "127.0.0.1"
+port = 11434
+model_tag = "speakleash/bielik-4.5b-v3.0-instruct:q8_0"
+model_digest = "88067a36fa44882b76463bb6befd0d8593a031032495fa48b9f957c3cb23858b"
+context_tokens = 2048
+
+[pricing.fake]
+input_per_million = 0.0
+output_per_million = 0.0
+
+[pricing.llama_server]
+input_per_million = 0.0
+output_per_million = 0.0
+
+[pricing.ollama]
+input_per_million = 0.0
+output_per_million = 0.0

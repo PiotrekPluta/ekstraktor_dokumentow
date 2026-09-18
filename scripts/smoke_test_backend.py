@@ -14,14 +14,26 @@ can serve it (wrong quantisation support, an incompatible chat template,
 etc.). A real completion — not just a `/health` 200 — is the only way to
 catch that at install time instead of on a reviewer's first `run`.
 
-Skips entirely (exit 0) when `config/default.toml` doesn't select
+Skips entirely (exit 0) when the selected config doesn't select
 `llama_server` — same scope as `fetch_runtime.py`, which never fetches
 anything for `ollama` either (`ARCHITECTURE.md`: that backend's model/
 process lifecycle stays a manual, out-of-scope step).
+
+Reads `config/default.toml` unless `EXTRACTOR_CONFIG_PATH` is set — a
+reviewer running `./setup.sh` as documented never sets it, so their
+behaviour is unchanged. It exists for `.github/workflows/macos.yml`'s
+manual end-to-end job: `config/ci_macos.toml` pins the exact same model as
+`config/default.toml` (`fetch_runtime.py` itself is never overridable —
+there is only ever one pinned model to fetch) but adds `extra_args =
+["-ngl", "0"]`, since GitHub's `macos-14` runners are arm64 without
+working Metal under Apple's virtualisation (`PROJECT_NOTES.md` §5) — the
+same reason `lifecycle.py`'s module docstring gives for never guessing
+`-ngl` from `platform.system()`.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -31,11 +43,17 @@ from extractor.llm.lifecycle import VENDOR_DIR, ServerLifecycleError, ensure_run
 from extractor.llm.llama_server import LlamaServerClient
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = REPO_ROOT / "config" / "default.toml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "default.toml"
+
+
+def _resolve_config_path() -> Path:
+    override = os.environ.get("EXTRACTOR_CONFIG_PATH")
+    return Path(override) if override else DEFAULT_CONFIG_PATH
 
 
 def main() -> None:
-    config = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    config_path = _resolve_config_path()
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     backend = config.get("backend", {}).get("name", "fake")
     if backend != "llama_server":
         print(

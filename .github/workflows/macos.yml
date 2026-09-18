@@ -1,0 +1,46 @@
+# Verifies the test suite on real macOS arm64 (GitHub's `macos-14` runner
+# is an M1). Correctness only, never performance — GitHub's own docs say
+# Metal Performance Shaders don't work under Apple's virtualisation on
+# these runners (docs/PROJECT_NOTES.md §5), so this can't stand in for
+# real M1 throughput numbers (that needs actual hardware — see
+# PROJECT_NOTES.md §5's "Verifying on real hardware" options). It exists
+# to catch macOS-specific code bugs (docs/PROJECT_NOTES.md §7: bash 3.2,
+# NFD filename normalisation, `ru_maxrss` units, case-insensitive
+# filesystem) before a real reviewer would — three real ones found this
+# way already (see ARCHITECTURE.md).
+#
+# The `fake`-backend test suite only — no network, no model, requirement
+# 10's own bar — so this runs on every push/PR since it's cheap. The
+# heavier, real-model end-to-end check lives in its own workflow
+# (macos-smoke-e2e.yml), manual-only, since it downloads the real ~5GB
+# GGUF every time.
+
+name: macOS arm64 (M1)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest-macos-arm64:
+    name: pytest (fake backend)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync dependencies
+        # --all-groups: tests/test_generator.py needs the `datagen` group
+        # (Pillow/reportlab) just to be collected, not only `dev`
+        # (pytest/ruff) — see setup.sh's own comment on this same flag.
+        # This job intentionally doesn't call setup.sh (no model fetch), so
+        # it needs the same flag applied here independently.
+        run: uv sync --locked --all-groups
+
+      - name: Run test suite (no network, no model, no API key — requirement 10)
+        run: uv run pytest -q

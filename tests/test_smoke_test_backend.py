@@ -20,9 +20,25 @@ import smoke_test_backend
 
 @pytest.fixture(autouse=True)
 def _config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    config_path = tmp_path / "default.toml"
-    monkeypatch.setattr(smoke_test_backend, "CONFIG_PATH", config_path)
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("EXTRACTOR_CONFIG_PATH", str(config_path))
     return config_path
+
+
+def test_resolve_config_path_defaults_when_env_var_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXTRACTOR_CONFIG_PATH", raising=False)
+    assert smoke_test_backend._resolve_config_path() == (
+        smoke_test_backend.DEFAULT_CONFIG_PATH
+    )
+
+
+def test_resolve_config_path_honours_env_var_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXTRACTOR_CONFIG_PATH", "/tmp/some/other.toml")
+    assert smoke_test_backend._resolve_config_path() == Path("/tmp/some/other.toml")
 
 
 def test_skips_when_backend_is_not_llama_server(

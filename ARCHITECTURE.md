@@ -486,6 +486,126 @@ local_cpu.toml` (untracked, this session's CPU-only dev config) sets
 `extra_args = ["-ngl", "0"]` explicitly rather than relying on this
 binary's being CPU-only anyway.
 
+**Two GitHub Actions workflows run this project's code on real macOS
+arm64** (GitHub's `macos-14` runner is an M1) — correctness only, never
+performance, per the same GitHub-arm64-has-no-working-Metal fact the
+`extra_args` decision above cites. Deliberately two *files*, not one file
+with two jobs (the original shape): `macos.yml` (`pytest-macos-arm64`, the
+`fake`-backend suite, no network/model, on every push/PR — cheap) and
+`macos-smoke-e2e.yml` (`smoke-e2e-macos-arm64`, a real `./setup.sh` +
+`extractor run --limit 1` against the actual pinned Bielik model,
+`workflow_dispatch`-only since it downloads the real ~5GB GGUF every
+time). Splitting them was a deliberate correction, not a rename: a single
+`on: [push, pull_request, workflow_dispatch]` workflow with the heavy job
+merely gated by `if: github.event_name == 'workflow_dispatch'` still
+*runs the workflow* (with that job skipped) on every push/PR — a separate
+file whose own `on:` is only `workflow_dispatch` means nothing in it
+executes at all until someone triggers it by hand from the Actions tab.
+The second workflow needs `-ngl 0` and a taller `timeout_s` than
+`config/default.toml` sets, but can't just edit `default.toml` (that stays
+the untouched M1-target default) — `config/ci_macos.toml` (committed, CI
+-only) pins the identical model/binary and adds only those two overrides.
+`scripts/smoke_test_backend.py` gained an `EXTRACTOR_CONFIG_PATH` env-var
+override (defaults to `config/default.toml`, unset for a real reviewer's
+plain `./setup.sh`) so the workflow can point it at `config/ci_macos.toml`
+without a second copy of the script or a reviewer-facing CLI flag nobody
+else needs. `fetch_runtime.py` itself takes no such override — it only
+ever fetches the one pinned model `config/default.toml` names, which is
+also what `config/ci_macos.toml` names, so there is only ever one
+`vendor/versions.lock` to produce or read regardless of which config a
+given step runs with.
+
+**The `pytest-macos-arm64` job's very first real run found a genuine,
+platform-independent bug**: `setup.sh` ran `uv sync --locked` with no
+`--group`/`--all-groups` flag, which only installs the `dev` dependency
+group (uv treats a group literally named `dev` as included by default) —
+not `datagen` (Pillow, `reportlab`), which `tests/test_generator.py`
+imports transitively (via `scripts/generate_data.py` →
+`scripts/generator/corrupt.py`'s `from PIL import Image, ImageDraw`) at
+*collection* time, aborting the entire suite (`Interrupted: 1 error during
+collection`) before a single test ran. This had been latent since Stage 1:
+every local dev `.venv` used while building this project already had
+`datagen` installed from that stage's own work, so `uv run pytest` never
+exercised the bare-`dev`-group path `setup.sh` actually produces on a
+fresh clone — reproduced locally on Linux too once checked (`uv sync
+--locked` alone genuinely uninstalls Pillow/reportlab here), confirming
+it was never OS-specific; the CI job just happened to be the first truly
+fresh `uv sync` this project had run. Fixed by changing `setup.sh` to
+`uv sync --locked --all-groups`, so a fresh reviewer clone installs
+everything both `pytest` and `ruff` need, matching `PROJECT_NOTES.md` §6's
+own stated intent ("do install it in `setup.sh` — requirement 10 has the
+reviewer run the tests") literally rather than only for the `dev` group.
+The first attempt at this fix touched only `setup.sh` and still failed on
+the next CI run, for a reason specific to this workflow rather than the
+underlying bug: `pytest-macos-arm64` deliberately never calls `setup.sh`
+(job 1 is the cheap job — no model fetch), so it has its own, separate
+`uv sync --locked` line in `.github/workflows/macos.yml` that needed the
+same `--all-groups` flag applied independently.
+
+**The next `pytest-macos-arm64` run (after the `datagen`-group fix) found
+two more real, previously-latent bugs**, both fixed in this same session:
+
+- `tests/test_memory.py`'s `_ru_maxrss_kb()` returned `ru_maxrss` raw and
+  unconverted. Its own module docstring already named the fact this
+  invited ("`ru_maxrss` alone differs in units between Linux and
+  macOS") but the helper itself never actually applied the conversion —
+  on macOS `ru_maxrss` is bytes, not kilobytes, so the test reported a
+  spurious ~6,300,000 "KB" (~6GB) of subprocess growth for what a `//
+  1024` fix (guarded by `sys.platform == "darwin"`) shows is actually
+  ~6MB — comfortably under the 150MB canary, i.e. streaming was working
+  correctly the whole time; only the unit label lied.
+- `tests/test_inventory.py`'s `corpus_conn` fixture asserted against the
+  full 48-file corpus, but `data/corpus/huge_log_*` are git-ignored
+  (DATA_SPEC.md §6 — a several-hundred-MB file has no business being
+  committed) and only ever existed on this project's dev machines because
+  `scripts/make_huge_file.py` had been run there by hand at some earlier
+  stage and simply left its output on disk — exactly the same shape of
+  bug as the `datagen`-group gap above (a real fresh checkout was the
+  first thing to ever *not* have it). Fixed the same way `run`'s backend
+  self-heals (the "Key decisions" `extractor.llm.lifecycle` entry above):
+  `corpus_conn` now calls `_ensure_huge_fixtures_exist()` first, which
+  regenerates both files via `make_huge_file.main()` only if they're
+  missing. Safe to call on a repo that already has the committed
+  `data/expected.jsonl` rows for them — `make_huge_file.append_to_expected`
+  already skips any file already listed there, so this never duplicates
+  those two ground-truth rows. Verified for real: deleted both files from
+  this session's own checkout, reran `test_inventory.py`/`test_memory.py`
+  cold, confirmed regeneration produces byte-identical sizes (314572860 /
+  31457322) and `data/expected.jsonl`/`data/MANIFEST.md` stay unmodified
+  (`git status` clean on both).
+
+Both were only ever reachable from a genuinely fresh checkout — no local
+dev `.venv`/`data/corpus` here had been "fresh" since Stage 1/2, which is
+exactly why the `pytest-macos-arm64` CI job (not reasoning about the code)
+is what found them.
+
+**A third, more consequential bug from that same run: `scripts/generator/
+render_pdf.py`'s `ensure_font_registered()` only ever looked at Linux font
+paths** (`/usr/share/fonts/.../DejaVuSans.ttf`), so every PDF-rendering
+path in `test_generator.py` raised `RuntimeError: DejaVu Sans font not
+found` on the CI runner. Unlike the two bugs above, this one is not
+CI-only: **the actual evaluation machine is macOS** (`docs/ZADANIE.md`
+"Maszyna oceniająca"), which doesn't ship `fonts-dejavu-core` either, so
+this would have failed requirement 10's test suite there too, not just in
+CI. Fixed by vendoring the font rather than depending on any system
+package manager: `scripts/generator/assets/DejaVuSans.ttf` /
+`DejaVuSans-Bold.ttf` (plus `DEJAVU-LICENSE`, Bitstream Vera License,
+explicit free-redistribution terms), fetched from the upstream
+`dejavu-fonts` GitHub release (`version_2_37`) and checked *before* the
+old system paths, which stay as a harmless fallback. Deliberately not
+"add macOS system-font paths instead" (the option this session considered
+and rejected): this sandbox has no way to confirm what font paths exist
+on a real M1, nor whether a substitute has full Polish-diacritic coverage
+— a silently-wrong-but-present font would be worse than a loud
+`RuntimeError`, and DejaVu was originally chosen specifically for its
+Polish glyph coverage. Verified for real, not just "registration
+succeeds": rendered a paragraph containing every Polish diacritic
+(`ąćęłńóśźż ĄĆĘŁŃÓŚŹŻ`) through `render_pdf()` with the font-candidate
+list forced to *only* the vendored path (no system font reachable at
+all), then read it back with `pypdfium2` — the same PDF library
+`extractor.textextract` itself uses — and confirmed the diacritics
+survive the full render-then-extract round trip.
+
 **`FakeLLMClient` gained a `responses: list[LLMResponse]` sequencing mode**
 (returns them in order, then repeats the last) — needed to test the
 repair-attempt path (invalid JSON, then valid) without a second test
