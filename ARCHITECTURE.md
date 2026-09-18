@@ -486,15 +486,22 @@ local_cpu.toml` (untracked, this session's CPU-only dev config) sets
 `extra_args = ["-ngl", "0"]` explicitly rather than relying on this
 binary's being CPU-only anyway.
 
-**`.github/workflows/macos.yml`** runs this project's code on real macOS
-arm64 (GitHub's `macos-14` runner is an M1) — correctness only, never
+**Two GitHub Actions workflows run this project's code on real macOS
+arm64** (GitHub's `macos-14` runner is an M1) — correctness only, never
 performance, per the same GitHub-arm64-has-no-working-Metal fact the
-`extra_args` decision above cites. Two jobs of deliberately different
-weight: `pytest-macos-arm64` (the `fake`-backend suite, no network/model,
-on every push/PR — cheap) and `smoke-e2e-macos-arm64` (a real
-`./setup.sh` + `extractor run --limit 1` against the actual pinned Bielik
-model, `workflow_dispatch`-only since it downloads the real ~5GB GGUF
-every time). The second job needs `-ngl 0` and a taller `timeout_s` than
+`extra_args` decision above cites. Deliberately two *files*, not one file
+with two jobs (the original shape): `macos.yml` (`pytest-macos-arm64`, the
+`fake`-backend suite, no network/model, on every push/PR — cheap) and
+`macos-smoke-e2e.yml` (`smoke-e2e-macos-arm64`, a real `./setup.sh` +
+`extractor run --limit 1` against the actual pinned Bielik model,
+`workflow_dispatch`-only since it downloads the real ~5GB GGUF every
+time). Splitting them was a deliberate correction, not a rename: a single
+`on: [push, pull_request, workflow_dispatch]` workflow with the heavy job
+merely gated by `if: github.event_name == 'workflow_dispatch'` still
+*runs the workflow* (with that job skipped) on every push/PR — a separate
+file whose own `on:` is only `workflow_dispatch` means nothing in it
+executes at all until someone triggers it by hand from the Actions tab.
+The second workflow needs `-ngl 0` and a taller `timeout_s` than
 `config/default.toml` sets, but can't just edit `default.toml` (that stays
 the untouched M1-target default) — `config/ci_macos.toml` (committed, CI
 -only) pins the identical model/binary and adds only those two overrides.
