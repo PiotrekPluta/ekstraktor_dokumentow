@@ -125,6 +125,25 @@ def start_process(argv: list[str], log_path: Path) -> subprocess.Popen:
     )
 
 
+_LOG_TAIL_LINES = 40
+
+
+def _log_tail(log_path: Path | None) -> str:
+    """Read for a timeout error message — `start_process()` redirects the
+    server's own stdout/stderr straight to `log_path`, never to whatever
+    process called `ensure_running()`. Without this, a CI step (or a
+    `run` invocation) that never captures that file separately gets no
+    information beyond "didn't become healthy" — found missing for real
+    against `macos-smoke-e2e.yml`'s first genuine timeout, where the
+    workflow's own visible output had nothing else to go on.
+    """
+    if log_path is None or not log_path.exists():
+        return ""
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    tail = "\n".join(lines[-_LOG_TAIL_LINES:])
+    return f"\n\n--- last {min(len(lines), _LOG_TAIL_LINES)} line(s) of {log_path} ---\n{tail}"
+
+
 def wait_until_healthy(
     host: str,
     port: int,
@@ -133,6 +152,7 @@ def wait_until_healthy(
     poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
     transport: httpx.BaseTransport | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    log_path: Path | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_s
     while True:
@@ -142,6 +162,7 @@ def wait_until_healthy(
             raise ServerLifecycleError(
                 f"llama-server did not become healthy within {timeout_s}s "
                 f"(http://{host}:{port}/health) — check its log."
+                f"{_log_tail(log_path)}"
             )
         sleep(poll_interval_s)
 
@@ -181,6 +202,7 @@ def ensure_running(
         poll_interval_s=poll_interval_s,
         transport=transport,
         sleep=sleep,
+        log_path=log_path,
     )
     return True
 
