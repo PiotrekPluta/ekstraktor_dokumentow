@@ -1,10 +1,10 @@
 # Architektura
 
-Stan na koniec developmentu: 
-- `run`/`report`/`eval` działają na rzeczywistym backendzie (`llama_server`, domyślnie) i przechodzą testy bez sieci/modelu/klucza API.
+## Informacje 
 - Dane wejściowe syntetyczne: `data/corpus`
 - Oczekiwane wyniki: `data/expected.jsonl`, 
 - Opis danych wejściowych: `data/MANIFEST.md`.
+- komendy `run`/`report`/`eval` działają na rzeczywistym backendzie (`llama_server`, domyślnie) i przechodzą testy bez sieci/modelu/klucza API.
 
 ## Kluczowe decyzje
 
@@ -15,10 +15,8 @@ Stan na koniec developmentu:
 - **Model i server przypięte do konkretnego commitu i sha256**:
   `speakleash/Bielik-4.5B-v3.0-Instruct-GGUF`, kwantyzacja `Q8_0` (~5,1GB), zweryfikowany bezpośrednio względem API Hugging Face. 
   Binarka `llama-server` przypięta do tagu release'u `ggml-org/llama.cpp` (`b10985`)
-- **`tokenizer.json`** jest wykorzystywany do obliczania tokenów a nie narzędzie dostarczane przez backend aby możliwe było przełączenie się między backendami.
+- **`tokenizer.json`** - wykorzystywany do obliczania tokenów jest częścią repozytorium a nie ściągany w czasie instlacji ponieważ jest nieosiągalny bez konta na huggingFace
 
-- **Backend wybierany wyłącznie przez konfigurację** (`llama_server` /
-  `ollama` / `fake`)
 
 - **Retry + circuit breaker to jeden wspólny dekorator** (`ResilientLLMClient`) wokół każdego backendu, nie osobna logika per backend. 
 - **Ekstrakcja tekstu izolowana per plik, w osobnym procesie z timeoutem**
@@ -53,14 +51,14 @@ Stan na koniec developmentu:
 - Zagnieżdżone załączniki `.eml` w `.eml` nie są śledzone.
 - Progi retry/backoff/circuit-breakera są zahardkodowane, nieskonfigurowalne
   przez plik konfiguracyjny (poza timeoutem pojedynczego zapytania).
-- Sprawdzenie „wartość występuje w źródle" nie chroni przed spreparowanym,
-  fałszywym blokiem JSON osadzonym w treści dokumentu 
+- Sprawdzenie „wartość występuje w źródle" nie chroni przed spreparowanym, fałszywym blokiem JSON osadzonym w treści dokumentu 
 - `eval`: metryka `summary` nie sprawdza języka wyniku; `nip_checksum_valid`
   jest napisany, ale nigdzie niewpięty do raportu (dałby dużo fałszywych
   alarmów na zagranicznych kontrahentach).
 - `--workers 16` przeciwko prawdziwemu `llama_server` nie był testowany
   automatycznie (tylko przeciw `fake`) — bezpieczna górna granica
   równoległości zależy od tego, jak wystartowano serwer.
+- Użycie drugiego, niedomyślnego backendu (Ollama) w zakresie start/stop, pobranie modelu pozostaje niestety w całości ręczny — `fetch_runtime.py`/`setup.sh` obsługują tylko (z braku czasu) `llama_server`.  Osoba testująca przełączając się na Ollamę musi sama odpalić `ollama serve`/`ollama pull`.
 
 ## Wąskie gardło przepustowości (wymaganie 5)
 
@@ -71,9 +69,7 @@ na czas odpowiedzi ma rozmiar kontekstu wysyłanego do modelu, nie rozmiar
 samego modelu — stąd okienkowanie długich dokumentów zamiast wysyłania
 całego tekstu. `--workers` kontroluje równoległość wszystkiego *poza*
 samym wywołaniem modelu — nie zwiększa liczby równoległych zapytań do
-serwera, bo to osobny parametr po stronie backendu (liczba slotów). Serwer
-uruchamiany przez `extractor.llm.lifecycle` zawsze ma `--parallel` równe
-liczbie workerów, więc te dwie wartości nie mogą się rozjechać.
+serwera, bo to osobny parametr po stronie backendu (liczba slotów). Serwer uruchamiany przez `extractor.llm.lifecycle` zawsze ma `--parallel` równe liczbie workerów, więc te dwie wartości nie mogą się rozjechać.
 
 ## Przy 100-krotnie większym archiwum
 
@@ -82,20 +78,15 @@ inferencji przestają wystarczać dużo wcześniej niż przy 100× większym
 archiwum. Co by się zmieniło: prawdziwa kolejka zadań zamiast workerów
 odpytujących jeden plik bazy, Postgres zamiast SQLite, i grupowanie
 (batching) zapytań do modelu zamiast jednego dokumentu na wywołanie.
-Deduplikacja na poziomie bajtów skaluje się liniowo już teraz (strumieniowe
-sha256, bez porównań parami) — tu nic nie trzeba zmieniać.
 
 Odpalanie osobnego procesu na plik przy ekstrakcji kosztuje ok. 300ms
 (start interpretera, ponowny import `pypdfium2`/`python-docx`) — przy 40
 plikach nieistotne, przy 4000 plikach to już ok. 20 minut samego narzutu
 startowego przed jakimkolwiek parsowaniem. Przy takiej skali potrzebna
-byłaby trwała pula workerów zamiast nowego procesu na plik, kosztem części
-izolacji.
+byłaby trwała pula workerów zamiast nowego procesu na plik.
 
 Pętla orkiestracji (jedno połączenie SQLite na wątek, krótkie transakcje
 serializowane przez WAL + `busy_timeout`) jest wystarczająca przy 40
 dokumentach i do 16 workerów. Przy 100× skali, z dużo większą liczbą
 workerów potrzebną do nakarmienia backendu zdolnego do batchowania,
-jednowątkowy zapis SQLite stałby się wąskim gardłem *przed* samym serwerem
-inferencji — to ta sama zmiana na Postgres co wyżej, tu uzasadniona
-konkretnie wzorcem zapisu z orkiestracji, nie abstrakcyjnie.
+jednowątkowy zapis SQLite stałby się wąskim gardłem *przed* samym serwerem inferencji.
